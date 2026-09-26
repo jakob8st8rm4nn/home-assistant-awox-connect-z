@@ -1,0 +1,35 @@
+{
+  "title": "AwoX Connect.Z",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sign in to AwoX / EGLO HomeControl",
+        "description": "Sign in once with your AwoX/EGLO HomeControl account. All compatible BLE lights in the account are imported automatically. The account password and cloud session token are not stored.",
+        "data": {
+          "email": "Email address",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "AwoX login failed.",
+      "cannot_connect": "The AwoX cloud is currently unreachable.",
+      "no_devices": "No compatible BLE lights were found in the AwoX account.",
+      "unknown": "An unexpected error occurred while importing the account."
+    },
+    "abort": {
+      "already_configured": "This AwoX account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "AwoX Connect.Z options",
+        "data": {
+          "default_transition": "Default transition in seconds",
+          "idle_disconnect": "Disconnect BLE after idle time (seconds)"
+        }
+      }
+    }
+  }
+}
