@@ -1,0 +1,35 @@
+{
+  "title": "AwoX Connect.Z",
+  "config": {
+    "step": {
+      "user": {
+        "title": "AwoX / EGLO HomeControl anmelden",
+        "description": "Melde dich einmal mit deinem AwoX-/EGLO-HomeControl-Konto an. Alle kompatiblen BLE-Lampen aus deinem Konto werden automatisch importiert. Das Konto-Passwort und der Cloud-Session-Token werden nicht gespeichert.",
+        "data": {
+          "email": "E-Mail-Adresse",
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "AwoX-Anmeldung fehlgeschlagen.",
+      "cannot_connect": "AwoX-Cloud ist derzeit nicht erreichbar.",
+      "no_devices": "Im AwoX-Konto wurden keine kompatiblen BLE-Lampen gefunden.",
+      "unknown": "Beim Import ist ein unerwarteter Fehler aufgetreten."
+    },
+    "abort": {
+      "already_configured": "Dieses AwoX-Konto ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "AwoX Connect.Z Optionen",
+        "data": {
+          "default_transition": "Standard-Übergang in Sekunden",
+          "idle_disconnect": "BLE nach Leerlauf trennen (Sekunden)"
+        }
+      }
+    }
+  }
+}
