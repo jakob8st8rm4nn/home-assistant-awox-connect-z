@@ -27,7 +27,11 @@
         "title": "AwoX Connect.Z Optionen",
         "data": {
           "default_transition": "Standard-Übergang in Sekunden",
-          "idle_disconnect": "BLE nach Leerlauf trennen (Sekunden)"
+          "idle_disconnect": "BLE nach Leerlauf trennen (Sekunden)",
+          "max_concurrent_commands": "Maximal gleichzeitige Lampenbefehle"
+        },
+        "data_description": {
+          "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für dieses Konto gleichzeitig laufen dürfen (1-32). Höhere Werte benötigen ausreichend freie Bluetooth-Verbindungskapazität."
         }
       }
     }

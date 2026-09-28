@@ -15,6 +15,16 @@ the local `service=zigbee` mesh credential required for BLE authentication.
 > hardware listed below, but other Connect.Z models and firmware versions still need
 > community testing.
 
+## AI-assisted development
+
+This project was developed with substantial assistance from **OpenAI ChatGPT**,
+including protocol analysis, code generation, debugging and documentation.
+
+The generated code was iteratively validated against real BLE captures and tested on
+physical lamps, but the project should still be treated as experimental community
+software. Human review, additional device testing and external contributions are
+welcome.
+
 ## Features
 
 - Power on/off
@@ -23,11 +33,13 @@ the local `service=zigbee` mesh credential required for BLE authentication.
 - Tunable white / color temperature
 - Home Assistant `transition` support
 - Automatic import of compatible BLE lights from an AwoX / EGLO HomeControl account
+- Per-device mesh addressing using the imported 16-bit HomeControl address
 - Automatic Home Assistant Bluetooth routing
 - ESPHome Bluetooth Proxy support
 - BLE reconnect and retry logic
 - Re-authentication after reconnect
 - Configurable idle disconnect to release Bluetooth connection slots
+- Configurable concurrent lamp command limit (1-32 per AwoX account)
 - Optimistic state restore after Home Assistant restarts
 - Diagnostics without exposing the AwoX account password or local mesh credential
 - Local integration branding on Home Assistant 2026.3+
@@ -76,6 +88,17 @@ to:
 ```
 
 and restart Home Assistant.
+
+## Upgrading from 1.0.0
+
+Version 1.1.0 requires a valid individual 16-bit mesh destination for every lamp.
+Existing cloud imports from version 1.0.0 already store this value, so installations
+with valid mesh addresses can be upgraded without removing the integration.
+
+If Home Assistant logs report that a lamp was skipped because it has no valid mesh
+destination, remove and re-add **AwoX Connect.Z** for the affected account. This
+reruns the HomeControl import and refreshes the device metadata. This may be needed
+for older manually configured entries or entries with missing or invalid mesh IDs.
 
 ## Configuration
 
@@ -135,6 +158,22 @@ integration must:
 Increase the idle timeout if you prefer faster repeated control and have enough BLE
 connection slots available.
 
+
+### Maximum concurrent lamp commands
+
+Default: **1**
+
+This setting controls how many AwoX lamp commands from the same account may execute at
+the same time. Enter a value from **1 to 32**.
+
+Use `1` for the most conservative behavior. Higher values can make group and scene
+changes more synchronous when enough Bluetooth adapters/proxies and connection slots are
+available. Setting the value higher than the available Bluetooth capacity can cause more
+connection retries or temporary connection-slot errors.
+
+This setting limits concurrent command operations. Existing BLE connections can remain
+open until the configured idle-disconnect timeout expires.
+
 ## Important Bluetooth note
 
 A Connect.Z lamp may not be connectable by Home Assistant while another device,
@@ -148,6 +187,14 @@ only in non-connectable history ...
 ```
 
 close/disconnect the official app and wait for the lamp to advertise again.
+
+## Device addressing
+
+Connect.Z command bytes 2-3 are treated as the 16-bit mesh destination in
+**big-endian** order. The destination is imported from the lamp's HomeControl
+device metadata. The integration deliberately does not use `0xFFFF` for normal
+device control because that value can be forwarded as a mesh-wide command once
+a session is warm.
 
 ## Known limitations
 
@@ -167,6 +214,7 @@ The implementation includes:
 - the Connect.Z pairing/authentication exchange,
 - per-connection session-key generation,
 - command encryption,
+- per-device big-endian mesh destination addressing,
 - the Connect.Z CRC-8 command checksum,
 - power commands,
 - Zigbee Level Control commands,
@@ -215,15 +263,6 @@ account secrets.**
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
 
-## AI-assisted development
-
-This project was developed with substantial assistance from **OpenAI ChatGPT**,
-including protocol analysis, code generation, debugging and documentation.
-
-The generated code was iteratively validated against real BLE captures and tested on
-physical lamps, but the project should still be treated as experimental community
-software. Human review, additional device testing and external contributions are
-welcome.
 
 ## Trademark / affiliation notice
 

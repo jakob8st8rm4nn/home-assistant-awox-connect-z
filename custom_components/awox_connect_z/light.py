@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from homeassistant.components.light import (
@@ -31,7 +32,9 @@ from .protocol import (
     make_power,
 )
 
-PARALLEL_UPDATES = 1
+# Home Assistant's platform semaphore is static. The integration uses a
+# per-config-entry semaphore so the limit can be changed in Options.
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -57,8 +60,10 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
     def __init__(self, client: AwoxConnectZClient, device: dict[str, Any]) -> None:
         self._client = client
+        self._operation_lock = asyncio.Lock()
         self._device = device
         self._mac = client.mac
+        self._mesh_id = int(device["mesh_id"])
         self._device_name = str(device.get("name") or f"AwoX {self._mac[-8:]}")
         self._attr_unique_id = self._mac.replace(":", "").lower()
         self._attr_is_on = False
@@ -91,6 +96,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             "last_ble_error": self._client.last_error,
             "last_command": self._client.last_command,
             "cloud_mesh_id": self._device.get("mesh_id"),
+            "mesh_destination": f"0x{self._mesh_id:04X}",
             "cloud_device_type": self._device.get("device_type"),
         }
 
@@ -117,50 +123,69 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             self._attr_color_mode = ColorMode.COLOR_TEMP
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on or alter the lamp."""
-        transition = float(kwargs.get(ATTR_TRANSITION, self._client.default_transition))
-        brightness = kwargs.get(ATTR_BRIGHTNESS)
-        hs_color = kwargs.get(ATTR_HS_COLOR)
-        color_temp_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
-        sent_something = False
-        if brightness is not None:
-            device_level = ha_brightness_to_device(int(brightness))
-            await self._client.async_send_plain(
-                make_brightness(device_level, transition), label=f"brightness:{brightness}"
+        """Turn on or alter the lamp as one serialized per-lamp operation."""
+        async with self._operation_lock:
+            transition = float(
+                kwargs.get(ATTR_TRANSITION, self._client.default_transition)
             )
-            self._attr_brightness = int(brightness)
-            self._attr_is_on = True
-            sent_something = True
-        elif not self._attr_is_on:
-            await self._client.async_send_plain(make_power(True), label="power:on")
-            self._attr_is_on = True
-            sent_something = True
-        if hs_color is not None:
-            hue, saturation = hs_color
-            await self._client.async_send_plain(
-                make_hs_color(hue, saturation, transition),
-                label=f"hs:{hue:.1f},{saturation:.1f}",
-            )
-            self._attr_hs_color = (float(hue), float(saturation))
-            self._attr_color_mode = ColorMode.HS
-            self._attr_is_on = True
-            sent_something = True
-        elif color_temp_kelvin is not None:
-            kelvin = max(MIN_COLOR_TEMP_KELVIN, min(MAX_COLOR_TEMP_KELVIN, int(color_temp_kelvin)))
-            await self._client.async_send_plain(
-                make_color_temp_kelvin(kelvin, transition), label=f"color_temp:{kelvin}K"
-            )
-            self._attr_color_temp_kelvin = kelvin
-            self._attr_color_mode = ColorMode.COLOR_TEMP
-            self._attr_is_on = True
-            sent_something = True
-        if not sent_something and not self._attr_is_on:
-            await self._client.async_send_plain(make_power(True), label="power:on")
-            self._attr_is_on = True
-        self.async_write_ha_state()
+            brightness = kwargs.get(ATTR_BRIGHTNESS)
+            hs_color = kwargs.get(ATTR_HS_COLOR)
+            color_temp_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
+            sent_something = False
+
+            if brightness is not None:
+                device_level = ha_brightness_to_device(int(brightness))
+                await self._client.async_send_plain(
+                    make_brightness(device_level, transition, mesh_id=self._mesh_id),
+                    label=f"brightness:{brightness}",
+                )
+                self._attr_brightness = int(brightness)
+                self._attr_is_on = True
+                sent_something = True
+            elif not self._attr_is_on:
+                await self._client.async_send_plain(
+                    make_power(True, mesh_id=self._mesh_id), label="power:on"
+                )
+                self._attr_is_on = True
+                sent_something = True
+
+            if hs_color is not None:
+                hue, saturation = hs_color
+                await self._client.async_send_plain(
+                    make_hs_color(hue, saturation, transition, mesh_id=self._mesh_id),
+                    label=f"hs:{hue:.1f},{saturation:.1f}",
+                )
+                self._attr_hs_color = (float(hue), float(saturation))
+                self._attr_color_mode = ColorMode.HS
+                self._attr_is_on = True
+                sent_something = True
+            elif color_temp_kelvin is not None:
+                kelvin = max(
+                    MIN_COLOR_TEMP_KELVIN,
+                    min(MAX_COLOR_TEMP_KELVIN, int(color_temp_kelvin)),
+                )
+                await self._client.async_send_plain(
+                    make_color_temp_kelvin(kelvin, transition, mesh_id=self._mesh_id),
+                    label=f"color_temp:{kelvin}K",
+                )
+                self._attr_color_temp_kelvin = kelvin
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+                self._attr_is_on = True
+                sent_something = True
+
+            if not sent_something and not self._attr_is_on:
+                await self._client.async_send_plain(
+                    make_power(True, mesh_id=self._mesh_id), label="power:on"
+                )
+                self._attr_is_on = True
+
+            self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off the lamp."""
-        await self._client.async_send_plain(make_power(False), label="power:off")
-        self._attr_is_on = False
-        self.async_write_ha_state()
+        """Turn off the lamp as one serialized per-lamp operation."""
+        async with self._operation_lock:
+            await self._client.async_send_plain(
+                make_power(False, mesh_id=self._mesh_id), label="power:off"
+            )
+            self._attr_is_on = False
+            self.async_write_ha_state()

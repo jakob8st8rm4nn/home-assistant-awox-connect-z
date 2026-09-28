@@ -27,7 +27,11 @@
         "title": "AwoX Connect.Z options",
         "data": {
           "default_transition": "Default transition in seconds",
-          "idle_disconnect": "Disconnect BLE after idle time (seconds)"
+          "idle_disconnect": "Disconnect BLE after idle time (seconds)",
+          "max_concurrent_commands": "Maximum concurrent lamp commands"
+        },
+        "data_description": {
+          "max_concurrent_commands": "Maximum number of AwoX lamp commands that may run at the same time for this account (1-32). Higher values require enough Bluetooth connection capacity."
         }
       }
     }

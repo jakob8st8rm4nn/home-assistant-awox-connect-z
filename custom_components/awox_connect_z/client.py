@@ -46,6 +46,8 @@ class AwoxConnectZClient:
         *,
         default_transition: float,
         idle_disconnect: float,
+        command_semaphore: asyncio.Semaphore,
+        max_concurrent_commands: int,
     ) -> None:
         self.hass = hass
         self.mac = mac
@@ -53,6 +55,8 @@ class AwoxConnectZClient:
         self.mesh_password = mesh_password
         self.default_transition = max(0.0, float(default_transition))
         self.idle_disconnect = max(5.0, float(idle_disconnect))
+        self.max_concurrent_commands = max(1, int(max_concurrent_commands))
+        self._command_semaphore = command_semaphore
 
         self._client: Any | None = None
         self._session_key: bytes | None = None
@@ -195,41 +199,44 @@ class AwoxConnectZClient:
 
     async def async_send_plain(self, plain16: bytes, *, label: str) -> None:
         """Send one command, reconnecting and re-authenticating when needed."""
-        async with self._command_lock:
-            last_exception: Exception | None = None
+        async with self._command_semaphore:
+            async with self._command_lock:
+                last_exception: Exception | None = None
 
-            for attempt in range(1, COMMAND_ATTEMPTS + 1):
-                try:
-                    await self._async_ensure_connected()
-                    if self._client is None or self._session_key is None:
-                        raise AwoxConnectZError("AwoX session was not created")
+                for attempt in range(1, COMMAND_ATTEMPTS + 1):
+                    try:
+                        await self._async_ensure_connected()
+                        if self._client is None or self._session_key is None:
+                            raise AwoxConnectZError(
+                                "AwoX session was not created"
+                            )
 
-                    packet = encrypt_command(self._session_key, plain16)
-                    await self._client.write_gatt_char(
-                        COMMAND_CHAR_UUID, packet, response=True
-                    )
-                    self.last_error = None
-                    self.last_command = label
-                    self._schedule_idle_disconnect()
-                    return
-                except Exception as err:
-                    last_exception = err
-                    self.last_error = str(err)
-                    _LOGGER.debug(
-                        "AwoX command %s failed on attempt %s/%s: %s",
-                        label,
-                        attempt,
-                        COMMAND_ATTEMPTS,
-                        err,
-                    )
-                    await self._async_disconnect(cancel_idle=True)
-                    if attempt < COMMAND_ATTEMPTS:
-                        await asyncio.sleep(0.5 * attempt)
+                        packet = encrypt_command(self._session_key, plain16)
+                        await self._client.write_gatt_char(
+                            COMMAND_CHAR_UUID, packet, response=True
+                        )
+                        self.last_error = None
+                        self.last_command = label
+                        self._schedule_idle_disconnect()
+                        return
+                    except Exception as err:
+                        last_exception = err
+                        self.last_error = str(err)
+                        _LOGGER.debug(
+                            "AwoX command %s failed on attempt %s/%s: %s",
+                            label,
+                            attempt,
+                            COMMAND_ATTEMPTS,
+                            err,
+                        )
+                        await self._async_disconnect(cancel_idle=True)
+                        if attempt < COMMAND_ATTEMPTS:
+                            await asyncio.sleep(0.5 * attempt)
 
-            raise AwoxConnectZError(
-                f"Command '{label}' failed after {COMMAND_ATTEMPTS} attempts: "
-                f"{last_exception}"
-            ) from last_exception
+                raise AwoxConnectZError(
+                    f"Command '{label}' failed after "
+                    f"{COMMAND_ATTEMPTS} attempts: {last_exception}"
+                ) from last_exception
 
     async def async_close(self) -> None:
         """Stop timers and release the BLE connection."""
@@ -251,6 +258,7 @@ class AwoxConnectZClient:
             "closed": self.closed,
             "default_transition": self.default_transition,
             "idle_disconnect": self.idle_disconnect,
+            "max_concurrent_commands": self.max_concurrent_commands,
             "last_command": self.last_command,
             "last_error": self.last_error,
         }

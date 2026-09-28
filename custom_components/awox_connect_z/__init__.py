@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -14,12 +15,16 @@ from .const import (
     CONF_DEVICES,
     CONF_IDLE_DISCONNECT,
     CONF_MAC,
+    CONF_MAX_CONCURRENT_COMMANDS,
     CONF_MESH_NAME,
     CONF_MESH_PASSWORD,
     CONF_NAME,
     DEFAULT_IDLE_DISCONNECT,
+    DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_NAME,
     DEFAULT_TRANSITION,
+    MAX_CONCURRENT_COMMANDS,
+    MIN_CONCURRENT_COMMANDS,
     DOMAIN,
 )
 from .protocol import protocol_self_test
@@ -84,12 +89,43 @@ async def async_setup_entry(
         )
         return False
 
+    max_concurrent_commands = max(
+        MIN_CONCURRENT_COMMANDS,
+        min(
+            MAX_CONCURRENT_COMMANDS,
+            int(
+                entry.options.get(
+                    CONF_MAX_CONCURRENT_COMMANDS,
+                    DEFAULT_MAX_CONCURRENT_COMMANDS,
+                )
+            ),
+        ),
+    )
+    command_semaphore = asyncio.Semaphore(max_concurrent_commands)
+
     clients: list[tuple[AwoxConnectZClient, dict]] = []
 
     for device in raw_devices:
         mac = str(device.get("mac") or "").upper()
         if not mac:
             continue
+
+        try:
+            mesh_id = int(device.get("mesh_id") or 0)
+        except (TypeError, ValueError):
+            mesh_id = 0
+
+        if not 1 <= mesh_id <= 0xFFFE:
+            _LOGGER.error(
+                "Skipping AwoX Connect.Z %s because no valid per-device "
+                "mesh destination is available; re-add the integration to "
+                "refresh device metadata",
+                mac,
+            )
+            continue
+
+        device = dict(device)
+        device["mesh_id"] = mesh_id
 
         client = AwoxConnectZClient(
             hass,
@@ -104,12 +140,14 @@ async def async_setup_entry(
                 CONF_IDLE_DISCONNECT,
                 DEFAULT_IDLE_DISCONNECT,
             ),
+            command_semaphore=command_semaphore,
+            max_concurrent_commands=max_concurrent_commands,
         )
         clients.append((client, dict(device)))
 
     if not clients:
         _LOGGER.error(
-            "AwoX config entry contains no usable lamp MAC addresses"
+            "AwoX config entry contains no usable lamp records with MAC and mesh ID"
         )
         return False
 

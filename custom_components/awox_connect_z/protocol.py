@@ -90,46 +90,68 @@ def _put_u16_le(block: bytearray, offset: int, value: int) -> None:
     block[offset + 1] = (value >> 8) & 0xFF
 
 
-def make_power(on: bool) -> bytes:
-    """Power command."""
+def _put_destination(block: bytearray, mesh_id: int) -> None:
+    """Write the confirmed 16-bit Connect.Z destination in big-endian order."""
+    mesh_id = int(mesh_id)
+    if not 1 <= mesh_id <= 0xFFFE:
+        raise ValueError(
+            f"Invalid Connect.Z mesh destination 0x{mesh_id & 0xFFFF:04X}"
+        )
+    block[2] = (mesh_id >> 8) & 0xFF
+    block[3] = mesh_id & 0xFF
+
+
+def make_power(on: bool, *, mesh_id: int) -> bytes:
+    """Power command addressed to one Connect.Z mesh device."""
     block = bytearray.fromhex(
-        "00 06 ff ff 01 06 00 00 00 00 00 00 00 00 00 00"
+        "00 06 00 00 01 06 00 00 00 00 00 00 00 00 00 00"
     )
+    _put_destination(block, mesh_id)
     block[7] = 1 if on else 0
     return finalize_block(block)
 
 
-def make_brightness(level: int, transition: float = 0.2) -> bytes:
-    """Brightness 1..254, using MoveToLevelWithOnOff."""
+def make_brightness(
+    level: int, transition: float = 0.2, *, mesh_id: int
+) -> bytes:
+    """Brightness 1..254, addressed to one device."""
     level = max(1, min(254, int(level)))
     block = bytearray.fromhex(
-        "00 0c ff ff 01 08 00 04 00 02 00 00 00 00 00 00"
+        "00 0c 00 00 01 08 00 04 00 02 00 00 00 00 00 00"
     )
+    _put_destination(block, mesh_id)
     block[8] = level
     _put_u16_le(block, 9, _transition_ds(transition))
     return finalize_block(block)
 
 
 def make_hs_color(
-    hue_degrees: float, saturation_percent: float, transition: float = 0.2
+    hue_degrees: float,
+    saturation_percent: float,
+    transition: float = 0.2,
+    *,
+    mesh_id: int,
 ) -> bytes:
-    """Hue/Saturation color command."""
+    """Hue/Saturation command addressed to one device."""
     hue = round((float(hue_degrees) % 360.0) * 254.0 / 360.0)
     saturation = round(
         max(0.0, min(100.0, float(saturation_percent))) * 254.0 / 100.0
     )
 
     block = bytearray.fromhex(
-        "00 0a ff ff 01 00 03 06 00 00 02 00 00 00 00 00"
+        "00 0a 00 00 01 00 03 06 00 00 02 00 00 00 00 00"
     )
+    _put_destination(block, mesh_id)
     block[8] = max(0, min(254, hue))
     block[9] = max(0, min(254, saturation))
     _put_u16_le(block, 10, _transition_ds(transition))
     return finalize_block(block)
 
 
-def make_color_temp_kelvin(kelvin: int, transition: float = 0.2) -> bytes:
-    """Color-temperature command."""
+def make_color_temp_kelvin(
+    kelvin: int, transition: float = 0.2, *, mesh_id: int
+) -> bytes:
+    """Color-temperature command addressed to one device."""
     kelvin = max(MIN_COLOR_TEMP_KELVIN, min(MAX_COLOR_TEMP_KELVIN, int(kelvin)))
     mired = round(1_000_000 / kelvin)
     mired = max(
@@ -138,8 +160,9 @@ def make_color_temp_kelvin(kelvin: int, transition: float = 0.2) -> bytes:
     )
 
     block = bytearray.fromhex(
-        "00 0a ff ff 01 00 03 0a 00 00 02 00 00 00 00 00"
+        "00 0a 00 00 01 00 03 0a 00 00 02 00 00 00 00 00"
     )
+    _put_destination(block, mesh_id)
     _put_u16_le(block, 8, mired)
     _put_u16_le(block, 10, _transition_ds(transition))
     return finalize_block(block)
@@ -152,26 +175,40 @@ def ha_brightness_to_device(brightness: int) -> int:
 
 def protocol_self_test() -> None:
     """Guard the reverse-engineered protocol against accidental regressions."""
+    # 0xD361 -> D3 61 and 0x8430 -> 84 30 were confirmed on real lamps.
     checks = (
         (
-            make_power(True),
-            bytes.fromhex("7b 06 ff ff 01 06 00 01 00 00 00 00 00 00 00 00"),
+            make_power(True, mesh_id=0xD361),
+            bytes.fromhex("36 06 d3 61 01 06 00 01 00 00 00 00 00 00 00 00"),
         ),
         (
-            make_power(False),
-            bytes.fromhex("1c 06 ff ff 01 06 00 00 00 00 00 00 00 00 00 00"),
+            make_power(False, mesh_id=0xD361),
+            bytes.fromhex("51 06 d3 61 01 06 00 00 00 00 00 00 00 00 00 00"),
         ),
         (
-            make_brightness(254, 0.2),
-            bytes.fromhex("2d 0c ff ff 01 08 00 04 fe 02 00 00 00 00 00 00"),
+            make_power(True, mesh_id=0x8430),
+            bytes.fromhex("6e 06 84 30 01 06 00 01 00 00 00 00 00 00 00 00"),
         ),
         (
-            make_hs_color(24 * 360 / 254, 184 * 100 / 254, 0.2),
-            bytes.fromhex("41 0a ff ff 01 00 03 06 18 b8 02 00 00 00 00 00"),
+            make_brightness(254, 0.2, mesh_id=0xD361),
+            bytes.fromhex("11 0c d3 61 01 08 00 04 fe 02 00 00 00 00 00 00"),
         ),
         (
-            make_color_temp_kelvin(round(1_000_000 / 252), 0.2),
-            bytes.fromhex("6f 0a ff ff 01 00 03 0a fc 00 02 00 00 00 00 00"),
+            make_hs_color(
+                24 * 360 / 254,
+                184 * 100 / 254,
+                0.2,
+                mesh_id=0xD361,
+            ),
+            bytes.fromhex("26 0a d3 61 01 00 03 06 18 b8 02 00 00 00 00 00"),
+        ),
+        (
+            make_color_temp_kelvin(
+                round(1_000_000 / 252),
+                0.2,
+                mesh_id=0xD361,
+            ),
+            bytes.fromhex("08 0a d3 61 01 00 03 0a fc 00 02 00 00 00 00 00"),
         ),
     )
     for actual, expected in checks:
@@ -179,4 +216,14 @@ def protocol_self_test() -> None:
             raise RuntimeError(
                 "AwoX protocol self-test failed: "
                 f"{actual.hex(' ')} != {expected.hex(' ')}"
+            )
+
+    for invalid in (0, 0xFFFF):
+        try:
+            make_power(True, mesh_id=invalid)
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError(
+                f"AwoX protocol self-test accepted invalid mesh id {invalid}"
             )

@@ -14,6 +14,11 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .cloud import (
     AwoxCloudError,
@@ -26,11 +31,15 @@ from .const import (
     CONF_DEVICES,
     CONF_EMAIL,
     CONF_IDLE_DISCONNECT,
+    CONF_MAX_CONCURRENT_COMMANDS,
     CONF_MESH_NAME,
     CONF_MESH_PASSWORD,
     CONF_OWNER_ID,
     DEFAULT_IDLE_DISCONNECT,
+    DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_TRANSITION,
+    MAX_CONCURRENT_COMMANDS,
+    MIN_CONCURRENT_COMMANDS,
     DOMAIN,
 )
 
@@ -142,6 +151,20 @@ class AwoxConnectZOptionsFlow(OptionsFlow):
                 ): vol.All(
                     vol.Coerce(float),
                     vol.Range(min=5.0, max=300.0),
+                ),
+                vol.Required(
+                    CONF_MAX_CONCURRENT_COMMANDS,
+                    default=options.get(
+                        CONF_MAX_CONCURRENT_COMMANDS,
+                        DEFAULT_MAX_CONCURRENT_COMMANDS,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_CONCURRENT_COMMANDS,
+                        max=MAX_CONCURRENT_COMMANDS,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
                 ),
             }
         )

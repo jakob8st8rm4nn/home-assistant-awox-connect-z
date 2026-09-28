@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-09-28
+
+### Added
+
+- Runtime-configurable limit for concurrent lamp commands per AwoX account.
+- Shared per-account command semaphore so multiple lamps can be controlled in parallel.
+- Per-lamp operation lock so overlapping service calls to the same lamp cannot interleave multi-command state changes.
+- Per-device 16-bit mesh destination addressing imported from HomeControl.
+- Number-box option for the concurrency limit, with a supported range of 1-32.
+
+### Upgrade note
+
+- Existing cloud-imported entries with valid mesh addresses can be upgraded directly. If logs report a missing or invalid mesh destination, remove and re-add the integration for the affected account to refresh HomeControl metadata. Older manually configured entries may require this step.
+
+### Changed
+
+- All power, brightness, hue/saturation and color-temperature commands now use the lamp's individual big-endian mesh destination instead of `0xFFFF`, preventing warm-session commands from affecting other lamps in the mesh.
+- Home Assistant's static light-platform semaphore is disabled (`PARALLEL_UPDATES = 0`);
+  the integration now controls command concurrency itself.
+- The AI-assisted development notice is shown near the top of the README for clearer
+  disclosure.
+
 ## [1.0.0] - 2026-09-26
 
 Initial public release.
