@@ -17,18 +17,29 @@
           "email": "E-Mail-Adresse",
           "password": "Passwort"
         }
+      },
+      "bluetooth_confirm": {
+        "title": "Neue AwoX Connect.Z Lampe entdeckt",
+        "description": "Home Assistant hat **{name}** mit der Mesh-Adresse **{mesh_id}** entdeckt. Beim Hinzufügen wird lokal geprüft, ob die Lampe zu einem bereits konfigurierten AwoX-Mesh gehört. Es werden keine Cloud-Zugangsdaten benötigt."
       }
     },
     "error": {
       "invalid_auth": "AwoX-Anmeldung fehlgeschlagen.",
       "cannot_connect": "AwoX-Cloud ist derzeit nicht erreichbar.",
       "no_devices": "Im AwoX-Konto wurden keine kompatiblen BLE-Lampen gefunden.",
-      "unknown": "Beim Import ist ein unerwarteter Fehler aufgetreten."
+      "unknown": "Beim Import ist ein unerwarteter Fehler aufgetreten.",
+      "not_same_mesh": "Die Lampe konnte mit keinem der bereits gespeicherten lokalen AwoX-Mesh-Zugänge authentifiziert werden. Sie gehört wahrscheinlich zu einem anderen Mesh oder ist noch nicht in der AwoX-App provisioniert.",
+      "device_unavailable": "Die lokale Bluetooth-Verbindung zur Lampe konnte gerade nicht zuverlässig hergestellt werden. Schließe gegebenenfalls die AwoX-App und versuche es erneut."
     },
     "abort": {
       "already_configured": "Dieses AwoX-Konto ist bereits eingerichtet.",
       "wrong_account": "Die eingegebenen Zugangsdaten gehören zu einem anderen AwoX-Konto. Der vorhandene Eintrag wurde nicht geändert.",
-      "reconfigure_successful": "AwoX-Kontodaten und Lampenliste wurden erfolgreich aktualisiert."
+      "reconfigure_successful": "AwoX-Kontodaten und Lampenliste wurden erfolgreich aktualisiert.",
+      "account_required": "Für Advertisement-Discovery muss zuerst mindestens ein AwoX Connect.Z Konto in Home Assistant eingerichtet sein.",
+      "device_already_configured": "Diese AwoX Connect.Z Lampe ist bereits in Home Assistant eingerichtet.",
+      "incomplete_advertisement": "Es konnte noch kein vollständiges Connect.Z Status-Advertisement mit gültiger Mesh-Adresse empfangen werden.",
+      "identity_mismatch": "Die Identitätsdaten im Advertisement passen nicht zur Bluetooth-Adresse.",
+      "device_added": "Die Lampe **{name}** wurde erfolgreich hinzugefügt."
     }
   },
   "options": {

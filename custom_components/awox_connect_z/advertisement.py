@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 AWOX_COMPANY_ID = 0x0160
+# Connect.Z manufacturer-data prefix used by the supported device profile.
+# Bytes 2-5 contain the lower four MAC bytes in reverse order.
+AWOX_CONNECT_Z_DATA_PREFIX = bytes((0x96, 0x20))
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +26,33 @@ class AwoxAdvertisementState:
     saturation_percent: float | None
     saturation_raw: int | None
     mode_raw: int
+
+
+def advertisement_matches_address(data: bytes, address: str) -> bool:
+    """Return whether the advertisement embeds the sender's MAC suffix.
+
+    Connect.Z advertisements encode the lower four bytes of the physical BLE
+    address at data[2:6] in reverse order. The upper two address bytes are not
+    present in this manufacturer payload.
+    """
+    compact = (
+        address.strip()
+        .replace(":", "")
+        .replace("-", "")
+        .replace(".", "")
+    )
+    if len(compact) != 12:
+        return False
+    try:
+        mac = bytes.fromhex(compact)
+    except ValueError:
+        return False
+
+    return (
+        len(data) >= 6
+        and data.startswith(AWOX_CONNECT_Z_DATA_PREFIX)
+        and bytes(reversed(data[2:6])) == mac[-4:]
+    )
 
 
 def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
@@ -96,8 +126,7 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
 
 def advertisement_self_test() -> None:
     """Guard the hardware-confirmed advertisement layout against regressions."""
-    # 60 % red: mesh bytes 61 D3 -> 0xD361, mode 03, brightness 98,
-    # hue 00, saturation FE. Remaining bytes are not relevant to state parsing.
+    # Known color-mode frame.
     red = bytes.fromhex(
         "96 20 19 75 41 38 03 00 02 61 D3 03 98 FF FF 00 FE 04 3E 60"
     )
@@ -111,8 +140,7 @@ def advertisement_self_test() -> None:
     if round(state.saturation_percent or 0) != 100:
         raise RuntimeError("AwoX advertisement self-test decoded saturation incorrectly")
 
-    # Hardware-confirmed white example: 0x30 -> ~19 %, C4 00 -> 196 mired
-    # -> ~5102 K.
+    # Known white-mode frame.
     white = bytes.fromhex(
         "96 20 19 75 41 38 03 00 02 61 D3 01 30 C4 00 FF FF 04 3E 60"
     )
@@ -126,3 +154,13 @@ def advertisement_self_test() -> None:
 
     if parse_awox_advertisement(bytes.fromhex("96 20 19 75 41 38")) is not None:
         raise RuntimeError("AwoX advertisement self-test accepted short base advert")
+
+    identity_frame = bytes.fromhex("96 20 19 75 41 38")
+    if not advertisement_matches_address(
+        identity_frame, "A4:C1:38:41:75:19"
+    ):
+        raise RuntimeError("AwoX advertisement self-test rejected matching MAC suffix")
+    if advertisement_matches_address(
+        identity_frame, "A4:C1:38:C6:68:B8"
+    ):
+        raise RuntimeError("AwoX advertisement self-test accepted wrong MAC suffix")

@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-09-29
+
+### Added
+
+- Home Assistant Bluetooth discovery for new Connect.Z lamps advertising the hardware-confirmed AwoX `0x0160` / `96 20` manufacturer-data pattern.
+- Discovered lamps are offered through a normal Home Assistant discovery confirmation flow instead of being added silently.
+- Before a discovered lamp is appended to an existing account entry, the integration locally authenticates to the lamp with the already stored mesh credentials and sends no light command.
+- Advertisement identity validation checks the embedded lower MAC bytes against the physical BLE advertiser address.
+
+### Changed
+
+- A lamp added through Bluetooth discovery initially uses its BLE local name plus the full Bluetooth MAC address (falling back to the MAC alone); a later **Reconfigure** refresh can replace it with HomeControl cloud metadata.
+- Bluetooth discovery now respects Home Assistant's ignored-device entries and excludes ignored entries when matching a discovered lamp to an existing AwoX account.
+- The integration continues waiting for a complete long advertisement when discovery starts from an incomplete packet and allows a later packet to retrigger discovery after a timeout.
+
 ## [1.3.0] - 2026-09-29
 
 ### Added

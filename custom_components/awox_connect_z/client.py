@@ -245,6 +245,19 @@ class AwoxConnectZClient:
             _worker(), f"AwoX Connect.Z idle disconnect {self.mac}"
         )
 
+    async def async_verify_mesh_credentials(self) -> None:
+        """Connect and authenticate without sending a lamp command."""
+        async with self._command_semaphore:
+            async with self._command_lock:
+                try:
+                    await self._async_ensure_connected()
+                    self.last_error = None
+                except Exception as err:
+                    self.last_error = str(err)
+                    raise
+                finally:
+                    await self._async_disconnect(cancel_idle=True)
+
     async def async_send_plain(self, plain16: bytes, *, label: str) -> None:
         """Send one command, reconnecting and re-authenticating when needed."""
         async with self._command_semaphore:

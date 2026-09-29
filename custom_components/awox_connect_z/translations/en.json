@@ -17,18 +17,29 @@
           "email": "Email address",
           "password": "Password"
         }
+      },
+      "bluetooth_confirm": {
+        "title": "New AwoX Connect.Z lamp discovered",
+        "description": "Home Assistant discovered **{name}** with mesh address **{mesh_id}**. When adding it, the integration checks locally whether the lamp belongs to an already configured AwoX mesh. No cloud credentials are required."
       }
     },
     "error": {
       "invalid_auth": "AwoX login failed.",
       "cannot_connect": "The AwoX cloud is currently unreachable.",
       "no_devices": "No compatible BLE lights were found in the AwoX account.",
-      "unknown": "An unexpected error occurred while importing the account."
+      "unknown": "An unexpected error occurred while importing the account.",
+      "not_same_mesh": "The lamp could not authenticate with any locally stored AwoX mesh credential. It likely belongs to a different mesh or has not yet been provisioned in the AwoX app.",
+      "device_unavailable": "A reliable local Bluetooth connection to the lamp could not be made right now. Close the AwoX app if necessary and try again."
     },
     "abort": {
       "already_configured": "This AwoX account is already configured.",
       "wrong_account": "The entered credentials belong to a different AwoX account. The existing entry was not changed.",
-      "reconfigure_successful": "The AwoX account data and lamp list were refreshed successfully."
+      "reconfigure_successful": "The AwoX account data and lamp list were refreshed successfully.",
+      "account_required": "At least one AwoX Connect.Z account must already be configured in Home Assistant before advertisement discovery can add lamps.",
+      "device_already_configured": "This AwoX Connect.Z lamp is already configured in Home Assistant.",
+      "incomplete_advertisement": "A complete Connect.Z state advertisement with a valid mesh address has not been received yet.",
+      "identity_mismatch": "The identity data in the advertisement does not match the Bluetooth address.",
+      "device_added": "Lamp **{name}** was added successfully."
     }
   },
   "options": {

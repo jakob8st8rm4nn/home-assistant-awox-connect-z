@@ -44,6 +44,7 @@ welcome.
 - Configurable concurrent lamp command limit (1-32 per AwoX account)
 - Optimistic state restore after Home Assistant restarts
 - Live state correction from Connect.Z BLE advertisements for already configured lamps
+- Discovery of newly provisioned Connect.Z lamps from BLE advertisements
 - Diagnostics without exposing the AwoX account password or local mesh credential
 - Local integration branding on Home Assistant 2026.3+
 
@@ -92,31 +93,22 @@ to:
 
 and restart Home Assistant.
 
-## Upgrading from 1.2.0
+## Upgrade notes
 
-Update the integration and restart Home Assistant. Existing account, lamp and
-option settings are retained. Use **Reconfigure** whenever you want to refresh
-the imported account data or add newly registered HomeControl lamps.
+Version 1.4.0 adds Bluetooth discovery for newly provisioned lamps. An existing
+AwoX account is required; confirm a discovered lamp in Home Assistant to add it
+after local mesh authentication. Existing lamps and options are retained.
 
-## Upgrading from 1.1.0
+Normal updates keep the existing account, lamp and option configuration. Update the
+integration and restart Home Assistant.
 
-Update the integration and restart Home Assistant. Existing account and lamp
-configuration can be kept.
+- **From 1.1.x or earlier:** version 1.2.0 changed the default idle-disconnect timeout
+  to **10 seconds**. An explicitly saved timeout is retained.
+- **From 1.0.x:** version 1.1.0 introduced mandatory individual 16-bit mesh destinations.
+  If a lamp is skipped because its mesh destination is missing or invalid, use
+  **Reconfigure** to refresh the HomeControl device metadata.
 
-Version 1.2.0 changes the default idle-disconnect timeout to **10 seconds**. An
-explicitly saved timeout remains unchanged; the new default applies when no value
-has been saved. You can adjust it in the integration options.
-
-## Upgrading from 1.0.0
-
-Versions 1.1.0 and later require a valid individual 16-bit mesh destination for every lamp.
-Existing cloud imports from version 1.0.0 already store this value, so installations
-with valid mesh addresses can be upgraded without removing the integration.
-
-If Home Assistant logs report that a lamp was skipped because it has no valid mesh
-destination, use **Reconfigure** on the existing **AwoX Connect.Z** entry and sign
-in again with the same account. This reruns the HomeControl import and refreshes
-the device metadata without deleting the integration.
+For release-by-release details, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Configuration
 
@@ -140,7 +132,6 @@ The integration stores the local `service=zigbee` mesh credential needed to
 authenticate directly to the lamps over BLE. This is what allows normal operation
 to remain local after setup.
 
-
 ### Reconfigure / refresh account data
 
 Open **Settings → Devices & services**, find **AwoX Connect.Z**, open the entry menu
@@ -158,6 +149,31 @@ The account password and cloud session token are not stored. After the refresh,
 the config entry is reloaded automatically. Lamps newly added to the same
 HomeControl account can therefore appear in Home Assistant without removing and
 re-adding the integration.
+
+### Bluetooth discovery of newly added lamps
+
+If an additional Connect.Z lamp is later provisioned in the official AwoX / EGLO
+HomeControl app, Home Assistant can discover the lamp from its Connect.Z BLE
+manufacturer advertisements.
+
+The discovered lamp is **not added silently**. Home Assistant shows it as a discovered
+device first. When you confirm the setup, the integration connects locally and verifies
+that the lamp accepts one of the mesh credentials already stored by an existing
+AwoX Connect.Z account entry. No AwoX account password or cloud login is used for this
+verification.
+
+Only after local mesh authentication succeeds is the lamp appended to the matching
+existing account entry and that entry is reloaded.
+
+This discovery path is intended for lamps that have already been provisioned into the
+same AwoX mesh. A factory-reset lamp or a lamp belonging to another mesh may be seen by
+Bluetooth, but it cannot be added through this flow because it will not authenticate
+with the stored mesh credential.
+
+Advertisement discovery initially uses the BLE local name together with the full Bluetooth
+MAC address (for example `EdBmpjEw (A4:C1:38:C6:68:B8)`). If no useful BLE local name is
+available, the full MAC address is used on its own. Because cloud metadata is not queried,
+using **Reconfigure** later refreshes the official HomeControl name and metadata.
 
 ## Options
 

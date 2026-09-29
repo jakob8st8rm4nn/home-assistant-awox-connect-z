@@ -168,8 +168,7 @@ async def async_setup_entry(
             if state is None:
                 return
 
-            # Only trust state from the configured lamp and its configured
-            # mesh destination. Bluetooth discovery is intentionally out of scope.
+            # Only trust state from the configured lamp and mesh destination.
             if state.mesh_id != _expected_mesh_id:
                 _LOGGER.debug(
                     "Ignoring AwoX advertisement for %s: mesh id 0x%04X "
