@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-09-30
+
+### Added
+
+- Per-lamp availability based on Bluetooth liveness.
+- A lamp becomes unavailable after the configured timeout (30 seconds by default) with neither a recent Bluetooth packet nor a working Home Assistant BLE connection, and automatically becomes available again when Bluetooth activity resumes.
+- Short, long and byte-identical repeated advertisements all count as liveness; duplicate packets are recognized through Home Assistant's latest Bluetooth service-info timestamp.
+- Successful Home Assistant GATT sessions count as liveness. The intentional idle disconnect of a known-good session starts a fresh availability window, while error cleanup does not create a false liveness signal.
+- The availability timeout is configurable per account from 10 to 300 seconds, with a default of 30 seconds.
+
+### Fixed
+
+- Integration options are now saved before the automatic reload, so changes take effect without a second reload.
+- Failed connection cleanup does not reset the availability timeout.
+
 ## [1.4.0] - 2026-09-29
 
 ### Added

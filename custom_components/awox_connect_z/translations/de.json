@@ -49,10 +49,12 @@
         "data": {
           "default_transition": "Standard-Übergang in Sekunden",
           "idle_disconnect": "BLE nach Leerlauf trennen (Sekunden)",
-          "max_concurrent_commands": "Maximal gleichzeitige Lampenbefehle"
+          "max_concurrent_commands": "Maximal gleichzeitige Lampenbefehle",
+          "availability_timeout": "Nicht verfügbar nach (Sekunden)"
         },
         "data_description": {
-          "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für dieses Konto gleichzeitig laufen dürfen (1-32). Höhere Werte benötigen ausreichend freie Bluetooth-Verbindungskapazität."
+          "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für dieses Konto gleichzeitig laufen dürfen (1-32). Höhere Werte benötigen ausreichend freie Bluetooth-Verbindungskapazität.",
+          "availability_timeout": "Zeit ohne Bluetooth-Lebenszeichen oder funktionierende HA-Verbindung, nach der eine Lampe als nicht verfügbar gilt (10–300 Sekunden)."
         }
       }
     }

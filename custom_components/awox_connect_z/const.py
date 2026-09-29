@@ -14,11 +14,19 @@ CONF_MESH_PASSWORD = "mesh_password"
 CONF_DEFAULT_TRANSITION = "default_transition"
 CONF_IDLE_DISCONNECT = "idle_disconnect"
 CONF_MAX_CONCURRENT_COMMANDS = "max_concurrent_commands"
+CONF_AVAILABILITY_TIMEOUT = "availability_timeout"
 
 DEFAULT_NAME = "AwoX Connect.Z"
 DEFAULT_TRANSITION = 0.2
 DEFAULT_IDLE_DISCONNECT = 10.0
 DEFAULT_MAX_CONCURRENT_COMMANDS = 1
+
+# A lamp stays available while HA has a live BLE connection or a Bluetooth
+# packet has been seen within this configurable window.
+DEFAULT_AVAILABILITY_TIMEOUT = 30.0
+MIN_AVAILABILITY_TIMEOUT = 10.0
+MAX_AVAILABILITY_TIMEOUT = 300.0
+AVAILABILITY_RECOVERY_POLL = 1.0
 MIN_CONCURRENT_COMMANDS = 1
 MAX_CONCURRENT_COMMANDS = 32
 

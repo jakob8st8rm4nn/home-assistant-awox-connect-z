@@ -12,7 +12,7 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
-    OptionsFlow,
+    OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import callback
@@ -38,6 +38,7 @@ from .cloud import (
     async_import_account,
 )
 from .const import (
+    CONF_AVAILABILITY_TIMEOUT,
     CONF_DEFAULT_TRANSITION,
     CONF_DEVICES,
     CONF_EMAIL,
@@ -46,10 +47,13 @@ from .const import (
     CONF_MESH_NAME,
     CONF_MESH_PASSWORD,
     CONF_OWNER_ID,
+    DEFAULT_AVAILABILITY_TIMEOUT,
     DEFAULT_IDLE_DISCONNECT,
     DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_TRANSITION,
+    MAX_AVAILABILITY_TIMEOUT,
     MAX_CONCURRENT_COMMANDS,
+    MIN_AVAILABILITY_TIMEOUT,
     MIN_CONCURRENT_COMMANDS,
     DOMAIN,
 )
@@ -158,6 +162,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 idle_disconnect=DEFAULT_IDLE_DISCONNECT,
                 command_semaphore=asyncio.Semaphore(1),
                 max_concurrent_commands=1,
+                availability_timeout=DEFAULT_AVAILABILITY_TIMEOUT,
             )
             try:
                 await verifier.async_verify_mesh_credentials()
@@ -177,7 +182,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(
         config_entry: ConfigEntry,
-    ) -> OptionsFlow:
+    ) -> OptionsFlowWithReload:
         return AwoxConnectZOptionsFlow()
 
     async def async_step_user(
@@ -437,20 +442,14 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-class AwoxConnectZOptionsFlow(OptionsFlow):
+class AwoxConnectZOptionsFlow(OptionsFlowWithReload):
     """Runtime tuning options shared by all lamps in the account."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            result = self.async_create_entry(
-                title="", data=user_input
-            )
-            await self.hass.config_entries.async_reload(
-                self.config_entry.entry_id
-            )
-            return result
+            return self.async_create_entry(title="", data=user_input)
 
         options = self.config_entry.options
         schema = vol.Schema(
@@ -474,6 +473,20 @@ class AwoxConnectZOptionsFlow(OptionsFlow):
                 ): vol.All(
                     vol.Coerce(float),
                     vol.Range(min=5.0, max=300.0),
+                ),
+                vol.Required(
+                    CONF_AVAILABILITY_TIMEOUT,
+                    default=options.get(
+                        CONF_AVAILABILITY_TIMEOUT,
+                        DEFAULT_AVAILABILITY_TIMEOUT,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_AVAILABILITY_TIMEOUT,
+                        max=MAX_AVAILABILITY_TIMEOUT,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
                 ),
                 vol.Required(
                     CONF_MAX_CONCURRENT_COMMANDS,

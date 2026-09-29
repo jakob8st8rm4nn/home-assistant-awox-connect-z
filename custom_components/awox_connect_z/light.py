@@ -86,8 +86,8 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
     @property
     def available(self) -> bool:
-        """Keep entity loaded across temporary BLE visibility gaps."""
-        return not self._client.closed
+        """Return availability from Bluetooth liveness tracking."""
+        return self._client.available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -127,11 +127,21 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 self._async_apply_advertisement_state
             )
         )
+        self.async_on_remove(
+            self._client.async_add_availability_listener(
+                self._async_availability_changed
+            )
+        )
 
         if self._client.advertisement_state is not None:
             self._async_apply_advertisement_state(
                 self._client.advertisement_state
             )
+
+    @callback
+    def _async_availability_changed(self, _available: bool) -> None:
+        """Write entity state when Bluetooth availability changes."""
+        self.async_write_ha_state()
 
     @callback
     def _async_apply_advertisement_state(

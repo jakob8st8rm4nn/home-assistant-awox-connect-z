@@ -17,6 +17,7 @@ from .advertisement import (
 )
 from .client import AwoxConnectZClient
 from .const import (
+    CONF_AVAILABILITY_TIMEOUT,
     CONF_DEFAULT_TRANSITION,
     CONF_DEVICES,
     CONF_IDLE_DISCONNECT,
@@ -25,11 +26,14 @@ from .const import (
     CONF_MESH_NAME,
     CONF_MESH_PASSWORD,
     CONF_NAME,
+    DEFAULT_AVAILABILITY_TIMEOUT,
     DEFAULT_IDLE_DISCONNECT,
     DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_NAME,
     DEFAULT_TRANSITION,
+    MAX_AVAILABILITY_TIMEOUT,
     MAX_CONCURRENT_COMMANDS,
+    MIN_AVAILABILITY_TIMEOUT,
     MIN_CONCURRENT_COMMANDS,
     DOMAIN,
 )
@@ -110,6 +114,19 @@ async def async_setup_entry(
     )
     command_semaphore = asyncio.Semaphore(max_concurrent_commands)
 
+    availability_timeout = max(
+        MIN_AVAILABILITY_TIMEOUT,
+        min(
+            MAX_AVAILABILITY_TIMEOUT,
+            float(
+                entry.options.get(
+                    CONF_AVAILABILITY_TIMEOUT,
+                    DEFAULT_AVAILABILITY_TIMEOUT,
+                )
+            ),
+        ),
+    )
+
     clients: list[tuple[AwoxConnectZClient, dict]] = []
 
     for device in raw_devices:
@@ -149,6 +166,7 @@ async def async_setup_entry(
             ),
             command_semaphore=command_semaphore,
             max_concurrent_commands=max_concurrent_commands,
+            availability_timeout=availability_timeout,
         )
         clients.append((client, dict(device)))
 
@@ -160,6 +178,8 @@ async def async_setup_entry(
             _client: AwoxConnectZClient = client,
             _expected_mesh_id: int = mesh_id,
         ) -> None:
+            _client.async_note_bluetooth_liveness(service_info.time)
+
             raw = service_info.manufacturer_data.get(AWOX_COMPANY_ID)
             if raw is None:
                 return
@@ -211,6 +231,8 @@ async def async_setup_entry(
         )
         if clear_history is not None:
             clear_history(hass, mac)
+
+        client.async_start_availability_tracking()
 
     if not clients:
         _LOGGER.error(

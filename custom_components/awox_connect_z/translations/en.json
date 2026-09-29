@@ -49,10 +49,12 @@
         "data": {
           "default_transition": "Default transition in seconds",
           "idle_disconnect": "Disconnect BLE after idle time (seconds)",
-          "max_concurrent_commands": "Maximum concurrent lamp commands"
+          "max_concurrent_commands": "Maximum concurrent lamp commands",
+          "availability_timeout": "Unavailable after (seconds)"
         },
         "data_description": {
-          "max_concurrent_commands": "Maximum number of AwoX lamp commands that may run at the same time for this account (1-32). Higher values require enough Bluetooth connection capacity."
+          "max_concurrent_commands": "Maximum number of AwoX lamp commands that may run at the same time for this account (1-32). Higher values require enough Bluetooth connection capacity.",
+          "availability_timeout": "Time without Bluetooth liveness or a working HA connection before a lamp is marked unavailable (10–300 seconds)."
         }
       }
     }

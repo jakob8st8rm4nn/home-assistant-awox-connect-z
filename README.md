@@ -44,6 +44,7 @@ welcome.
 - Configurable concurrent lamp command limit (1-32 per AwoX account)
 - Optimistic state restore after Home Assistant restarts
 - Live state correction from Connect.Z BLE advertisements for already configured lamps
+- Configurable Bluetooth liveness availability with automatic recovery
 - Discovery of newly provisioned Connect.Z lamps from BLE advertisements
 - Diagnostics without exposing the AwoX account password or local mesh credential
 - Local integration branding on Home Assistant 2026.3+
@@ -95,9 +96,12 @@ and restart Home Assistant.
 
 ## Upgrade notes
 
-Version 1.4.0 adds Bluetooth discovery for newly provisioned lamps. An existing
-AwoX account is required; confirm a discovered lamp in Home Assistant to add it
-after local mesh authentication. Existing lamps and options are retained.
+Version 1.5.0 adds per-lamp availability tracking, enabled with a default timeout of
+30 seconds. Existing account, lamp and option settings are retained. After updating,
+you can adjust **Unavailable after (seconds)** from 10 to 300 seconds in the
+integration options. Lamps without recent Bluetooth activity or a working HA BLE
+connection now become unavailable instead of keeping their last state indefinitely.
+Automations should account for this unavailable state.
 
 Normal updates keep the existing account, lamp and option configuration. Update the
 integration and restart Home Assistant.
@@ -175,7 +179,31 @@ MAC address (for example `EdBmpjEw (A4:C1:38:C6:68:B8)`). If no useful BLE local
 available, the full MAC address is used on its own. Because cloud metadata is not queried,
 using **Reconfigure** later refreshes the official HomeControl name and metadata.
 
+### Lamp availability
+
+A configured lamp is considered available while either:
+
+- Home Assistant has a working BLE connection to it, or
+- Home Assistant has seen any Bluetooth packet from it within the configured availability timeout.
+
+Short and long Connect.Z advertisements both count as liveness. Identical repeated
+advertisements count as well, even when Home Assistant suppresses duplicate
+integration callbacks.
+
+The normal BLE idle disconnect does **not** make a lamp unavailable. A successful
+HA connection is itself a liveness signal, and the configured timeout begins again
+when an intentional idle disconnect releases that known-good session. If no packet is seen and no working HA BLE connection remains for the configured
+timeout, the light entity becomes unavailable. It returns to available automatically
+when Bluetooth activity is seen again. Recovery from an unchanged advertisement
+may take about one second because its timestamp is checked periodically. The default
+timeout is **30 seconds** and
+can be configured from **10 to 300 seconds** in the integration options.
+
 ## Options
+
+The account-wide options include the default transition, BLE idle-disconnect time,
+maximum concurrent lamp commands, and the **availability timeout**. The availability
+timeout defaults to **30 seconds** and accepts values from **10 to 300 seconds**.
 
 Open the integration and choose **Configure**.
 

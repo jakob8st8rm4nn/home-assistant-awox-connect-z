@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -16,7 +17,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
 from .advertisement import AwoxAdvertisementState
-from .const import COMMAND_CHAR_UUID, PAIR_CHAR_UUID
+from .const import (
+    AVAILABILITY_RECOVERY_POLL,
+    DEFAULT_AVAILABILITY_TIMEOUT,
+    COMMAND_CHAR_UUID,
+    PAIR_CHAR_UUID,
+)
 from .protocol import encrypt_command, make_pair_packet, make_session_key
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +57,7 @@ class AwoxConnectZClient:
         idle_disconnect: float,
         command_semaphore: asyncio.Semaphore,
         max_concurrent_commands: int,
+        availability_timeout: float = DEFAULT_AVAILABILITY_TIMEOUT,
     ) -> None:
         self.hass = hass
         self.mac = mac
@@ -58,6 +65,7 @@ class AwoxConnectZClient:
         self.mesh_password = mesh_password
         self.default_transition = max(0.0, float(default_transition))
         self.idle_disconnect = max(5.0, float(idle_disconnect))
+        self.availability_timeout = max(0.0, float(availability_timeout))
         self.max_concurrent_commands = max(1, int(max_concurrent_commands))
         self._command_semaphore = command_semaphore
 
@@ -76,6 +84,13 @@ class AwoxConnectZClient:
             Callable[[AwoxAdvertisementState], None]
         ] = set()
 
+        self._available = True
+        self._availability_started = time.monotonic()
+        self._last_liveness = self._availability_started
+        self._availability_task: asyncio.Task[None] | None = None
+        self._availability_wakeup = asyncio.Event()
+        self._availability_listeners: set[Callable[[bool], None]] = set()
+
     @property
     def connected(self) -> bool:
         """Return current BLE connection state."""
@@ -89,6 +104,111 @@ class AwoxConnectZClient:
     def advertisement_state(self) -> AwoxAdvertisementState | None:
         """Return the latest decoded long advertisement state, if any."""
         return self._advertisement_state
+
+    @property
+    def available(self) -> bool:
+        """Return whether the lamp has recent Bluetooth liveness."""
+        return not self._closed and self._available
+
+    @callback
+    def async_add_availability_listener(
+        self, listener: Callable[[bool], None]
+    ) -> Callable[[], None]:
+        """Subscribe an entity to availability changes."""
+        self._availability_listeners.add(listener)
+
+        @callback
+        def _remove_listener() -> None:
+            self._availability_listeners.discard(listener)
+
+        return _remove_listener
+
+    @callback
+    def _async_set_available(self, available: bool) -> None:
+        """Update availability and notify listeners only on a change."""
+        if self._available == available:
+            return
+
+        self._available = available
+        for listener in tuple(self._availability_listeners):
+            listener(available)
+
+    @callback
+    def async_note_bluetooth_liveness(self, seen_time: float | None = None) -> None:
+        """Record a Bluetooth packet and make the lamp available immediately."""
+        self._last_liveness = max(
+            self._last_liveness,
+            seen_time if seen_time is not None else time.monotonic(),
+        )
+        self._async_set_available(True)
+        self._availability_wakeup.set()
+
+    @callback
+    def _async_note_connection_liveness(self) -> None:
+        """Record a known-good local GATT session as a liveness signal."""
+        self._last_liveness = time.monotonic()
+        self._async_set_available(True)
+        self._availability_wakeup.set()
+
+    def _latest_liveness_time(self) -> float:
+        """Return the newest packet/session liveness timestamp known to HA."""
+        latest = self._last_liveness
+        service_info = bluetooth.async_last_service_info(
+            self.hass, self.mac, connectable=False
+        )
+        if service_info is not None:
+            latest = max(latest, float(service_info.time))
+        return latest
+
+    @callback
+    def async_start_availability_tracking(self) -> None:
+        """Start availability tracking for this lamp."""
+        if self._availability_task is not None or self._closed:
+            return
+
+        async def _worker() -> None:
+            try:
+                while not self._closed:
+                    self._availability_wakeup.clear()
+
+                    if self.connected:
+                        self._async_set_available(True)
+                        wait_seconds = self.availability_timeout
+                    else:
+                        age = max(
+                            0.0,
+                            time.monotonic() - self._latest_liveness_time(),
+                        )
+                        if age < self.availability_timeout:
+                            self._async_set_available(True)
+                            wait_seconds = max(
+                                0.05, self.availability_timeout - age
+                            )
+                        else:
+                            self._async_set_available(False)
+                            # Home Assistant updates BluetoothServiceInfoBleak.time
+                            # even when an identical advertisement is deduplicated
+                            # before integration callbacks. While unavailable, poll
+                            # that timestamp briefly so unchanged packets restore
+                            # availability as soon as practical.
+                            wait_seconds = AVAILABILITY_RECOVERY_POLL
+
+                    try:
+                        await asyncio.wait_for(
+                            self._availability_wakeup.wait(),
+                            timeout=wait_seconds,
+                        )
+                    except TimeoutError:
+                        pass
+            except asyncio.CancelledError:
+                return
+            finally:
+                if asyncio.current_task() is self._availability_task:
+                    self._availability_task = None
+
+        self._availability_task = self.hass.async_create_task(
+            _worker(), f"AwoX Connect.Z availability {self.mac}"
+        )
 
     @callback
     def async_add_advertisement_listener(
@@ -191,12 +311,18 @@ class AwoxConnectZClient:
                 self._client = client
                 await self._async_authenticate()
                 self.last_error = None
+                self._async_note_connection_liveness()
                 _LOGGER.debug("Authenticated AwoX Connect.Z %s", self.mac)
             except Exception:
                 await self._async_disconnect(cancel_idle=False)
                 raise
 
-    async def _async_disconnect(self, *, cancel_idle: bool = True) -> None:
+    async def _async_disconnect(
+        self,
+        *,
+        cancel_idle: bool = True,
+        mark_liveness: bool = False,
+    ) -> None:
         if cancel_idle and self._idle_task is not None:
             current = asyncio.current_task()
             if self._idle_task is not current:
@@ -208,9 +334,12 @@ class AwoxConnectZClient:
         self._session_key = None
 
         had_client = client is not None
-        if client is not None and client.is_connected:
+        was_connected = bool(client is not None and client.is_connected)
+        if was_connected:
             with suppress(Exception):
                 await client.disconnect()
+            if mark_liveness:
+                self._async_note_connection_liveness()
 
         if had_client:
             # Home Assistant deduplicates identical advertisements. Clear the
@@ -231,7 +360,10 @@ class AwoxConnectZClient:
             try:
                 await asyncio.sleep(self.idle_disconnect)
                 async with self._command_lock:
-                    await self._async_disconnect(cancel_idle=False)
+                    await self._async_disconnect(
+                        cancel_idle=False,
+                        mark_liveness=True,
+                    )
                     _LOGGER.debug(
                         "Idle-disconnected AwoX Connect.Z %s", self.mac
                     )
@@ -278,6 +410,7 @@ class AwoxConnectZClient:
                         )
                         self.last_error = None
                         self.last_command = label
+                        self._async_note_connection_liveness()
                         self._schedule_idle_disconnect()
                         return
                     except Exception as err:
@@ -302,6 +435,14 @@ class AwoxConnectZClient:
     async def async_close(self) -> None:
         """Stop timers and release the BLE connection."""
         self._closed = True
+        self._availability_wakeup.set()
+
+        if self._availability_task is not None:
+            self._availability_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._availability_task
+            self._availability_task = None
+
         if self._idle_task is not None:
             self._idle_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -316,7 +457,9 @@ class AwoxConnectZClient:
         return {
             "mac": self.mac,
             "connected": self.connected,
+            "available": self.available,
             "closed": self.closed,
+            "availability_timeout": self.availability_timeout,
             "default_transition": self.default_transition,
             "idle_disconnect": self.idle_disconnect,
             "max_concurrent_commands": self.max_concurrent_commands,
