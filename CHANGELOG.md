@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-09-29
+
+### Added
+
+- Live lamp-state synchronization from AwoX Connect.Z BLE manufacturer advertisements (`0x0160`) for already configured lamps.
+- Advertisement decoding for power, brightness, hue/saturation color mode and white color temperature.
+- Validation of the advertised mesh ID against the configured lamp before applying state.
+
+### Changed
+
+- Home Assistant now corrects its optimistic light state when a valid hardware advertisement is received, including changes made outside Home Assistant such as through the official app.
+- After a Home Assistant GATT session ends, advertisement history is cleared when the running Home Assistant version supports it so the next identical lamp advertisement can be delivered again.
+- On integration setup/reload, cached advertisement replay is disabled and advertisement deduplication history is cleared after callback registration where the respective Home Assistant APIs are available. This allows the next real packet to be delivered even when its payload is unchanged.
+- Where supported by Home Assistant, advertisement history is also cleared during cleanup when a known BLE session has already dropped unexpectedly.
+- The default BLE idle-disconnect timeout is now 10 seconds instead of 20 seconds so lamps can resume advertising sooner after Home Assistant control. Explicitly saved timeout settings remain unchanged.
+
+
 ## [1.1.0] - 2026-09-28
 
 ### Added

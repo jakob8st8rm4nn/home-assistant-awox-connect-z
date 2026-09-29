@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import async_ble_device_from_address
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
+from .advertisement import AwoxAdvertisementState
 from .const import COMMAND_CHAR_UUID, PAIR_CHAR_UUID
 from .protocol import encrypt_command, make_pair_packet, make_session_key
 
@@ -68,6 +71,11 @@ class AwoxConnectZClient:
         self.last_error: str | None = None
         self.last_command: str | None = None
 
+        self._advertisement_state: AwoxAdvertisementState | None = None
+        self._advertisement_listeners: set[
+            Callable[[AwoxAdvertisementState], None]
+        ] = set()
+
     @property
     def connected(self) -> bool:
         """Return current BLE connection state."""
@@ -76,6 +84,34 @@ class AwoxConnectZClient:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def advertisement_state(self) -> AwoxAdvertisementState | None:
+        """Return the latest decoded long advertisement state, if any."""
+        return self._advertisement_state
+
+    @callback
+    def async_add_advertisement_listener(
+        self, listener: Callable[[AwoxAdvertisementState], None]
+    ) -> Callable[[], None]:
+        """Subscribe an entity to decoded advertisement state changes."""
+        self._advertisement_listeners.add(listener)
+
+        @callback
+        def _remove_listener() -> None:
+            self._advertisement_listeners.discard(listener)
+
+        return _remove_listener
+
+    @callback
+    def async_set_advertisement_state(
+        self, state: AwoxAdvertisementState
+    ) -> None:
+        """Store one decoded advertisement and notify entity listeners."""
+        self._advertisement_state = state
+
+        for listener in tuple(self._advertisement_listeners):
+            listener(state)
 
     async def _async_find_device(self) -> Any:
         for attempt in range(1, DISCOVERY_ATTEMPTS + 1):
@@ -171,9 +207,21 @@ class AwoxConnectZClient:
         self._client = None
         self._session_key = None
 
+        had_client = client is not None
         if client is not None and client.is_connected:
             with suppress(Exception):
                 await client.disconnect()
+
+        if had_client:
+            # Home Assistant deduplicates identical advertisements. Clear the
+            # per-address history after every known GATT session, including when
+            # the BLE link already dropped unexpectedly before cleanup ran.
+            clear_history = getattr(
+                bluetooth, "async_clear_advertisement_history", None
+            )
+            if clear_history is not None:
+                with suppress(Exception):
+                    clear_history(self.hass, self.mac)
 
     def _schedule_idle_disconnect(self) -> None:
         if self._idle_task is not None:

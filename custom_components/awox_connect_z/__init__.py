@@ -5,10 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 
+from .advertisement import (
+    AWOX_COMPANY_ID,
+    advertisement_self_test,
+    parse_awox_advertisement,
+)
 from .client import AwoxConnectZClient
 from .const import (
     CONF_DEFAULT_TRANSITION,
@@ -81,6 +87,7 @@ async def async_setup_entry(
 ) -> bool:
     """Set up every lamp imported from the AwoX account."""
     protocol_self_test()
+    advertisement_self_test()
 
     raw_devices = list(entry.data.get(CONF_DEVICES) or [])
     if not raw_devices:
@@ -144,6 +151,67 @@ async def async_setup_entry(
             max_concurrent_commands=max_concurrent_commands,
         )
         clients.append((client, dict(device)))
+
+        @callback
+        def _async_handle_advertisement(
+            service_info: bluetooth.BluetoothServiceInfoBleak,
+            _change: bluetooth.BluetoothChange,
+            *,
+            _client: AwoxConnectZClient = client,
+            _expected_mesh_id: int = mesh_id,
+        ) -> None:
+            raw = service_info.manufacturer_data.get(AWOX_COMPANY_ID)
+            if raw is None:
+                return
+
+            state = parse_awox_advertisement(bytes(raw))
+            if state is None:
+                return
+
+            # Only trust state from the configured lamp and its configured
+            # mesh destination. Bluetooth discovery is intentionally out of scope.
+            if state.mesh_id != _expected_mesh_id:
+                _LOGGER.debug(
+                    "Ignoring AwoX advertisement for %s: mesh id 0x%04X "
+                    "does not match configured 0x%04X",
+                    _client.mac,
+                    state.mesh_id,
+                    _expected_mesh_id,
+                )
+                return
+
+            _client.async_set_advertisement_state(state)
+
+        register_kwargs = {}
+        replay_type = getattr(bluetooth, "BluetoothCallbackReplay", None)
+        if replay_type is not None:
+            # RestoreEntity already handles startup state. Avoid treating an old
+            # cached advertisement as a fresh hardware confirmation.
+            register_kwargs["replay"] = replay_type.DISABLED
+
+        unregister_advertisement = bluetooth.async_register_callback(
+            hass,
+            _async_handle_advertisement,
+            {
+                "address": mac,
+                "manufacturer_id": AWOX_COMPANY_ID,
+                "connectable": False,
+            },
+            # The long Connect.Z status payload is carried in scan-response
+            # manufacturer data on the tested lamps, so request active scan.
+            bluetooth.BluetoothScanningMode.ACTIVE,
+            **register_kwargs,
+        )
+        entry.async_on_unload(unregister_advertisement)
+
+        # Do not replay an old cached packet as a fresh hardware state, but make
+        # sure the next real packet is delivered even when its payload is
+        # byte-for-byte identical to the packet Home Assistant saw previously.
+        clear_history = getattr(
+            bluetooth, "async_clear_advertisement_history", None
+        )
+        if clear_history is not None:
+            clear_history(hass, mac)
 
     if not clients:
         _LOGGER.error(

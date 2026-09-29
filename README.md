@@ -41,6 +41,7 @@ welcome.
 - Configurable idle disconnect to release Bluetooth connection slots
 - Configurable concurrent lamp command limit (1-32 per AwoX account)
 - Optimistic state restore after Home Assistant restarts
+- Live state correction from Connect.Z BLE advertisements for already configured lamps
 - Diagnostics without exposing the AwoX account password or local mesh credential
 - Local integration branding on Home Assistant 2026.3+
 
@@ -89,9 +90,18 @@ to:
 
 and restart Home Assistant.
 
+## Upgrading from 1.1.0
+
+Update the integration and restart Home Assistant. Existing account and lamp
+configuration can be kept.
+
+Version 1.2.0 changes the default idle-disconnect timeout to **10 seconds**. An
+explicitly saved timeout remains unchanged; the new default applies when no value
+has been saved. You can adjust it in the integration options.
+
 ## Upgrading from 1.0.0
 
-Version 1.1.0 requires a valid individual 16-bit mesh destination for every lamp.
+Versions 1.1.0 and later require a valid individual 16-bit mesh destination for every lamp.
 Existing cloud imports from version 1.0.0 already store this value, so installations
 with valid mesh addresses can be upgraded without removing the integration.
 
@@ -141,7 +151,7 @@ integration default.
 
 ### Idle disconnect
 
-Default: **20 seconds**
+Default: **10 seconds**
 
 After the lamp has been idle for this period, the BLE connection is closed to free
 a connection slot on the Bluetooth adapter or ESPHome proxy.
@@ -198,9 +208,9 @@ a session is warm.
 
 ## Known limitations
 
-- Lamp state is currently **optimistic** in Home Assistant.
-- Changes made in the official app are not yet synchronized back into Home Assistant.
-- The 20-byte status notifications from the lamp are not fully decoded yet.
+- Home Assistant commands are applied optimistically first; a later valid BLE advertisement corrects the entity to the hardware-reported state.
+- A lamp may stop sending long state advertisements while another device holds its direct BLE connection, so external changes can appear only after advertisements resume.
+- The GATT status characteristic/notification path is not used for live state; state synchronization currently relies on BLE advertisements.
 - Device compatibility outside the tested model is not yet known.
 - Bluetooth connection availability depends on adapter/proxy range and free connection slots.
 
@@ -219,7 +229,8 @@ The implementation includes:
 - power commands,
 - Zigbee Level Control commands,
 - Zigbee Color Control hue/saturation commands,
-- Zigbee Color Control color-temperature commands.
+- Zigbee Color Control color-temperature commands,
+- Connect.Z `0x0160` advertisement state decoding.
 
 No firmware modification is required.
 
@@ -241,8 +252,15 @@ Check that:
 
 ### Home Assistant shows an old optimistic state
 
-State changes made outside Home Assistant are not yet decoded from lamp
-notifications. Send a command from Home Assistant to update the optimistic state.
+The integration corrects light state when it receives a valid long Connect.Z
+manufacturer advertisement. If another device currently holds the lamp's direct BLE
+connection, long state advertisements may pause. Wait for advertisements to resume
+or close the other BLE connection.
+
+Home Assistant's own BLE connection can also pause these reports until the
+idle-disconnect timeout expires. On older Home Assistant versions without
+advertisement-history controls, state correction may have to wait until the
+advertised data changes.
 
 ## Contributing
 
