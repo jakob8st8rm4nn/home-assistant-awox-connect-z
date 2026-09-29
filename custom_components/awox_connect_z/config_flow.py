@@ -113,6 +113,69 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders=description_placeholders,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Refresh account, mesh credentials and lamp metadata."""
+        errors: dict[str, str] = {}
+        reconfigure_entry = self._get_reconfigure_entry()
+
+        if user_input is not None:
+            email = str(user_input[CONF_EMAIL]).strip().lower()
+            password = str(user_input[CONF_PASSWORD])
+
+            try:
+                imported = await async_import_account(
+                    self.hass, email, password
+                )
+            except AwoxInvalidAuth:
+                errors["base"] = "invalid_auth"
+            except AwoxNoDevices:
+                errors["base"] = "no_devices"
+            except AwoxCloudError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                errors["base"] = "unknown"
+            else:
+                await self.async_set_unique_id(
+                    f"awox-cloud-{imported.owner_id}"
+                )
+                self._abort_if_unique_id_mismatch(
+                    reason="wrong_account"
+                )
+
+                return self.async_update_reload_and_abort(
+                    reconfigure_entry,
+                    data_updates={
+                        CONF_EMAIL: email,
+                        CONF_OWNER_ID: imported.owner_id,
+                        CONF_MESH_NAME: imported.mesh_name,
+                        CONF_MESH_PASSWORD: imported.mesh_password,
+                        CONF_DEVICES: imported.devices,
+                    },
+                )
+
+        email_default = (
+            str(user_input.get(CONF_EMAIL, "")).strip().lower()
+            if user_input is not None
+            else str(
+                reconfigure_entry.data.get(CONF_EMAIL, "")
+            )
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_EMAIL, default=email_default
+                ): str,
+                vol.Required(CONF_PASSWORD): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=schema,
+            errors=errors,
+        )
+
 
 class AwoxConnectZOptionsFlow(OptionsFlow):
     """Runtime tuning options shared by all lamps in the account."""

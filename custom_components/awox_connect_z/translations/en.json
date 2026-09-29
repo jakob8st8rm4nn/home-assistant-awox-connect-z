@@ -9,6 +9,14 @@
           "email": "Email address",
           "password": "Password"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure AwoX account",
+        "description": "Sign in again with the same AwoX/EGLO HomeControl account. The integration refreshes the current lamp list, mesh addresses and mesh credentials from the cloud. The account password and cloud session token are not stored.",
+        "data": {
+          "email": "Email address",
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -18,7 +26,9 @@
       "unknown": "An unexpected error occurred while importing the account."
     },
     "abort": {
-      "already_configured": "This AwoX account is already configured."
+      "already_configured": "This AwoX account is already configured.",
+      "wrong_account": "The entered credentials belong to a different AwoX account. The existing entry was not changed.",
+      "reconfigure_successful": "The AwoX account data and lamp list were refreshed successfully."
     }
   },
   "options": {

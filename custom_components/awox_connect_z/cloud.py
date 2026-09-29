@@ -1,7 +1,7 @@
 """One-shot import of AwoX / EGLO HomeControl account data.
 
-The account password is used only during config flow. The password and Parse
-session token are deliberately not stored. We persist only the local
+The account password is used only during setup or manual reconfiguration. The password
+and Parse session token are deliberately not stored. We persist only the local
 service=zigbee mesh credential and lamp metadata needed for local BLE control.
 """
 

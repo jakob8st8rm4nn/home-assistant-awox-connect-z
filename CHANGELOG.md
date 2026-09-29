@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-09-29
+
+### Added
+
+- Home Assistant **Reconfigure** flow for refreshing the existing AwoX account import without removing the integration.
+- Reconfiguration refreshes the current compatible lamp list, per-device mesh addresses, cloud metadata and local `service=zigbee` mesh credentials.
+- Reconfiguration verifies that the supplied credentials belong to the same configured AwoX account before updating the entry.
+
+### Changed
+
+- The AwoX account password remains temporary during reconfiguration and is not stored.
+- A successful reconfiguration reloads the existing config entry so newly imported lamps are set up immediately.
+
 ## [1.2.0] - 2026-09-29
 
 ### Added

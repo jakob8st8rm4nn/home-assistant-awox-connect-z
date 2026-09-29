@@ -8,8 +8,9 @@ Unofficial Home Assistant custom integration for **EGLO / AwoX Connect.Z RGB/TW 
 
 The integration controls supported lamps locally over Bluetooth, including through
 Home Assistant's **ESPHome Bluetooth Proxy** routing. The AwoX / EGLO HomeControl
-cloud is used only during initial setup to import the account's lamp metadata and
-the local `service=zigbee` mesh credential required for BLE authentication.
+cloud is used during initial setup and only when the user manually chooses **Reconfigure**
+to refresh the account's lamp metadata and the local `service=zigbee` mesh credential
+required for BLE authentication.
 
 > **Status:** experimental / community-supported. It works reliably on the tested
 > hardware listed below, but other Connect.Z models and firmware versions still need
@@ -33,6 +34,7 @@ welcome.
 - Tunable white / color temperature
 - Home Assistant `transition` support
 - Automatic import of compatible BLE lights from an AwoX / EGLO HomeControl account
+- Manual account refresh through Home Assistant's **Reconfigure** flow
 - Per-device mesh addressing using the imported 16-bit HomeControl address
 - Automatic Home Assistant Bluetooth routing
 - ESPHome Bluetooth Proxy support
@@ -59,7 +61,7 @@ If your model works, please open a compatibility report so the table can be expa
 - Home Assistant Bluetooth integration
 - A connectable Bluetooth adapter or ESPHome Bluetooth Proxy that can reach the lamp
 - An AwoX / EGLO HomeControl account containing the Connect.Z lamps
-- Internet access during initial setup only, for the one-time account import
+- Internet access during initial setup and when manually using **Reconfigure**
 
 ## Installation
 
@@ -90,6 +92,12 @@ to:
 
 and restart Home Assistant.
 
+## Upgrading from 1.2.0
+
+Update the integration and restart Home Assistant. Existing account, lamp and
+option settings are retained. Use **Reconfigure** whenever you want to refresh
+the imported account data or add newly registered HomeControl lamps.
+
 ## Upgrading from 1.1.0
 
 Update the integration and restart Home Assistant. Existing account and lamp
@@ -106,9 +114,9 @@ Existing cloud imports from version 1.0.0 already store this value, so installat
 with valid mesh addresses can be upgraded without removing the integration.
 
 If Home Assistant logs report that a lamp was skipped because it has no valid mesh
-destination, remove and re-add **AwoX Connect.Z** for the affected account. This
-reruns the HomeControl import and refreshes the device metadata. This may be needed
-for older manually configured entries or entries with missing or invalid mesh IDs.
+destination, use **Reconfigure** on the existing **AwoX Connect.Z** entry and sign
+in again with the same account. This reruns the HomeControl import and refreshes
+the device metadata without deleting the integration.
 
 ## Configuration
 
@@ -125,12 +133,31 @@ The integration then imports compatible BLE lights from the account automaticall
 
 ### Credential handling
 
-The AwoX account password is used only during the setup flow and is **not stored**
-in the Home Assistant config entry.
+The AwoX account password is used only during initial setup or manual
+reconfiguration and is **not stored** in the Home Assistant config entry.
 
 The integration stores the local `service=zigbee` mesh credential needed to
 authenticate directly to the lamps over BLE. This is what allows normal operation
 to remain local after setup.
+
+
+### Reconfigure / refresh account data
+
+Open **Settings → Devices & services**, find **AwoX Connect.Z**, open the entry menu
+and choose **Reconfigure**.
+
+The email address is prefilled. Enter the AwoX / EGLO HomeControl password again.
+The integration signs in temporarily, verifies that the credentials belong to the
+same configured account, then refreshes:
+
+- compatible lamps,
+- per-lamp mesh addresses and cloud metadata,
+- the local `service=zigbee` mesh name and password.
+
+The account password and cloud session token are not stored. After the refresh,
+the config entry is reloaded automatically. Lamps newly added to the same
+HomeControl account can therefore appear in Home Assistant without removing and
+re-adding the integration.
 
 ## Options
 

@@ -9,6 +9,14 @@
           "email": "E-Mail-Adresse",
           "password": "Passwort"
         }
+      },
+      "reconfigure": {
+        "title": "AwoX-Konto neu konfigurieren",
+        "description": "Melde dich erneut mit demselben AwoX-/EGLO-HomeControl-Konto an. Die Integration lädt die aktuelle Lampenliste, Mesh-Adressen und Mesh-Zugangsdaten aus der Cloud neu. Das Konto-Passwort und der Cloud-Session-Token werden nicht gespeichert.",
+        "data": {
+          "email": "E-Mail-Adresse",
+          "password": "Passwort"
+        }
       }
     },
     "error": {
@@ -18,7 +26,9 @@
       "unknown": "Beim Import ist ein unerwarteter Fehler aufgetreten."
     },
     "abort": {
-      "already_configured": "Dieses AwoX-Konto ist bereits eingerichtet."
+      "already_configured": "Dieses AwoX-Konto ist bereits eingerichtet.",
+      "wrong_account": "Die eingegebenen Zugangsdaten gehören zu einem anderen AwoX-Konto. Der vorhandene Eintrag wurde nicht geändert.",
+      "reconfigure_successful": "AwoX-Kontodaten und Lampenliste wurden erfolgreich aktualisiert."
     }
   },
   "options": {
