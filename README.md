@@ -7,10 +7,10 @@
 Unofficial Home Assistant custom integration for **EGLO / AwoX Connect.Z RGB/TW lights**.
 
 The integration controls supported lamps locally over Bluetooth, including through
-Home Assistant's **ESPHome Bluetooth Proxy** routing. The AwoX / EGLO HomeControl
-cloud is used during initial setup and only when the user manually chooses **Reconfigure**
-to refresh the account's lamp metadata and the local `service=zigbee` mesh credential
-required for BLE authentication.
+Home Assistant's **ESPHome Bluetooth Proxy** routing. Setup can either import the required
+mesh data from AwoX / EGLO HomeControl or be completed fully locally with the mesh name,
+mesh password and each lamp's Bluetooth address / 16-bit mesh destination. Normal light
+control does not use the cloud.
 
 > **Status:** experimental / community-supported. It works reliably on the tested
 > hardware listed below, but other Connect.Z models and firmware versions still need
@@ -34,6 +34,7 @@ welcome.
 - Tunable white / color temperature
 - Home Assistant `transition` support
 - Automatic import of compatible BLE lights from an AwoX / EGLO HomeControl account
+- Fully local setup without a cloud login using mesh credentials and Bluetooth-discovered or manually entered lamp data
 - Manual account refresh through Home Assistant's **Reconfigure** flow
 - Per-device mesh addressing using the imported 16-bit HomeControl address
 - Automatic Home Assistant Bluetooth routing
@@ -41,7 +42,7 @@ welcome.
 - BLE reconnect and retry logic
 - Re-authentication after reconnect
 - Configurable idle disconnect to release Bluetooth connection slots
-- Configurable concurrent lamp command limit (1-32 per AwoX account)
+- Configurable concurrent lamp command limit (1-32 per configured mesh entry)
 - Optimistic state restore after Home Assistant restarts
 - Live state correction from Connect.Z BLE advertisements for already configured lamps
 - Configurable Bluetooth liveness availability with automatic recovery
@@ -62,8 +63,8 @@ If your model works, please open a compatibility report so the table can be expa
 - Home Assistant **2026.3 or newer**
 - Home Assistant Bluetooth integration
 - A connectable Bluetooth adapter or ESPHome Bluetooth Proxy that can reach the lamp
-- An AwoX / EGLO HomeControl account containing the Connect.Z lamps
-- Internet access during initial setup and when manually using **Reconfigure**
+- Either an AwoX / EGLO HomeControl account **or** the local mesh name/password plus each lamp's MAC and mesh ID
+- Internet access only when using the optional HomeControl cloud import or cloud **Reconfigure** flow
 
 ## Installation
 
@@ -96,16 +97,26 @@ and restart Home Assistant.
 
 ## Upgrade notes
 
-Version 1.5.0 adds per-lamp availability tracking, enabled with a default timeout of
-30 seconds. Existing account, lamp and option settings are retained. After updating,
-you can adjust **Unavailable after (seconds)** from 10 to 300 seconds in the
-integration options. Lamps without recent Bluetooth activity or a working HA BLE
-connection now become unavailable instead of keeping their last state indefinitely.
-Automations should account for this unavailable state.
+Version 1.6.0 adds an optional fully local setup path and local mesh management.
+Existing cloud-imported entries, lamp entities and saved options are retained. Update
+and restart Home Assistant; existing installations do not need to be removed or
+reconfigured, and do not need to switch to local setup.
 
-Normal updates keep the existing account, lamp and option configuration. Update the
-integration and restart Home Assistant.
+For a new local setup, the mesh name and password must already be known. They are
+not the HomeControl account login. The integration does not read these credentials
+from a lamp or provision a new mesh. Each value must fit within 16 UTF-8 bytes.
+Lamps can be discovered or entered manually using their MAC address and mesh ID.
 
+The local setup uses a 30-second discovery window. Where supported, Home Assistant's
+active-scan API is explicitly requested; older supported versions collect normal
+Bluetooth advertisements. Selected lamps are authenticated with up to two checks in
+parallel and a 20-second budget per lamp. Normal command timing and parallelism are
+unchanged.
+
+- **From 1.4.x or earlier:** version 1.5.0 introduced lamp availability tracking,
+  with a default of 30 seconds. The value is configurable from 10 to 300 seconds.
+  Automations should account for lamps becoming unavailable when Bluetooth
+  liveness is lost.
 - **From 1.1.x or earlier:** version 1.2.0 changed the default idle-disconnect timeout
   to **10 seconds**. An explicitly saved timeout is retained.
 - **From 1.0.x:** version 1.1.0 introduced mandatory individual 16-bit mesh destinations.
@@ -120,30 +131,60 @@ Go to:
 
 **Settings → Devices & services → Add integration → AwoX Connect.Z**
 
-Enter only:
+Home Assistant offers two setup paths.
 
-- AwoX / EGLO HomeControl email address
-- AwoX / EGLO HomeControl password
+### HomeControl cloud import
 
-The integration then imports compatible BLE lights from the account automatically.
+Choose **Via AwoX / EGLO HomeControl** and enter the HomeControl email address and
+password. The integration imports compatible lamps, their individual 16-bit mesh
+destinations and the local mesh credential automatically.
 
-### Credential handling
+The AwoX account password is used only during setup or cloud reconfiguration and is
+**not stored** in the Home Assistant config entry.
 
-The AwoX account password is used only during initial setup or manual
-reconfiguration and is **not stored** in the Home Assistant config entry.
+### Fully local setup
 
-The integration stores the local `service=zigbee` mesh credential needed to
-authenticate directly to the lamps over BLE. This is what allows normal operation
-to remain local after setup.
+Choose **Local mesh credentials** and enter the local mesh name and mesh password.
+These credentials must already be known; the integration cannot read them from a lamp
+and does not create or provision a new mesh. Both mesh name and mesh password must be non-empty and each fit within 16 UTF-8 bytes, matching the protocol limit. No AwoX / EGLO cloud login is performed.
 
-### Reconfigure / refresh account data
+Home Assistant then collects Bluetooth advertisements during a 30-second discovery window and lists
+every unconfigured Connect.Z lamp for which a complete long advertisement with a valid
+16-bit mesh ID is freshly observed during that window. Old cached Bluetooth records are
+not treated as discoveries from the new scan. On Home Assistant versions that expose the one-shot active-scan API (introduced in Home Assistant 2026.6), the flow explicitly requests an active Bluetooth sweep for the scan window. Older supported versions fall back to normal callback collection. If the active-scan API exists but fails at runtime, the flow keeps collecting normal advertisements for the remaining window and shows a recoverable error so the search can be retried. When a scan returns no devices, the setup page explicitly shows **No matching Connect.Z lamps were found** instead of an empty device list. The collected lamps are shown together
+and selected by default. A lamp that did not send a complete long advertisement can be
+added manually from its Bluetooth MAC address and mesh ID (decimal or hexadecimal, for
+example `0xD361`); after verification it returns to the same shared selection list. The device-selection page also offers **Search again** to run another scan without leaving the flow. On a rescan, devices that are still freshly visible keep their current checked/unchecked selection state, newly discovered devices are checked automatically, and devices no longer freshly seen disappear.
+
+A manually assigned lamp name is preserved if the same lamp is found by a later **Search again** scan. If a later long advertisement reports a different mesh ID, the integration does not silently overwrite the manual/stored target address: it shows both IDs and requires an explicit manual correction. Local Reconfigure also scans devices already in the current hub, so an incorrectly stored mesh ID can be detected and fixed.
+
+Before the entry is saved, Home Assistant authenticates locally to every selected lamp
+with the entered mesh credential without sending a light command. These interactive checks
+run with a 20-second setup-specific timeout per lamp and up to two lamps are checked concurrently, so an
+offline selection does not wait through the normal command client's full discovery retry
+window. If several selected lamps are unreachable, they are reported together. Successful checks are
+cached for the lifetime of the setup dialog, so a manually verified lamp is not connected
+a second time during final save unless the mesh credentials change.
+Immediately before a local entry is created or updated, Home Assistant performs a final ownership check of the selected Bluetooth MAC addresses. This closes the race where another setup flow could claim the same lamp while authentication was running.
+
+A local AwoX mesh is represented by **one Home Assistant config entry / hub containing
+all selected lamps**, rather than one hub per lamp. Each new local mesh receives a random,
+stable Home Assistant unique ID that is independent of the mutable mesh name/password.
+Re-running local setup with the same mesh credentials appends newly selected lamps to the
+existing local mesh instead of creating a duplicate hub.
+
+The mesh password is stored in the config entry because it is required for normal local
+BLE authentication. Additional provisioned lamps can also be added later through the
+normal Bluetooth discovery flow when they accept the same stored mesh credential. If a lamp is added through local setup while a Bluetooth discovery card for the same MAC is still open, that stale discovery card is closed automatically.
+
+### Reconfigure
 
 Open **Settings → Devices & services**, find **AwoX Connect.Z**, open the entry menu
 and choose **Reconfigure**.
 
-The email address is prefilled. Enter the AwoX / EGLO HomeControl password again.
-The integration signs in temporarily, verifies that the credentials belong to the
-same configured account, then refreshes:
+For a cloud-imported entry, the email address is prefilled. Enter the AwoX / EGLO
+HomeControl password again. The integration signs in temporarily, verifies that the
+credentials belong to the same configured account, then refreshes:
 
 - compatible lamps,
 - per-lamp mesh addresses and cloud metadata,
@@ -154,6 +195,12 @@ the config entry is reloaded automatically. Lamps newly added to the same
 HomeControl account can therefore appear in Home Assistant without removing and
 re-adding the integration.
 
+For a locally configured entry, **Reconfigure** asks for the mesh name and mesh
+password and verifies them against at least one configured lamp. It then performs the
+same 30-second discovery window for additional unconfigured lamps and also offers the manual
+MAC/mesh-ID fallback. Existing lamps stay in the hub; newly selected lamps are appended.
+No cloud login is used.
+
 ### Bluetooth discovery of newly added lamps
 
 If an additional Connect.Z lamp is later provisioned in the official AwoX / EGLO
@@ -163,11 +210,11 @@ manufacturer advertisements.
 The discovered lamp is **not added silently**. Home Assistant shows it as a discovered
 device first. When you confirm the setup, the integration connects locally and verifies
 that the lamp accepts one of the mesh credentials already stored by an existing
-AwoX Connect.Z account entry. No AwoX account password or cloud login is used for this
-verification.
+AwoX Connect.Z entry (cloud-imported or locally configured). No AwoX account password or
+cloud login is used for this verification.
 
 Only after local mesh authentication succeeds is the lamp appended to the matching
-existing account entry and that entry is reloaded.
+existing mesh entry and that entry is reloaded.
 
 This discovery path is intended for lamps that have already been provisioned into the
 same AwoX mesh. A factory-reset lamp or a lamp belonging to another mesh may be seen by
@@ -176,8 +223,9 @@ with the stored mesh credential.
 
 Advertisement discovery initially uses the BLE local name together with the full Bluetooth
 MAC address (for example `EdBmpjEw (A4:C1:38:C6:68:B8)`). If no useful BLE local name is
-available, the full MAC address is used on its own. Because cloud metadata is not queried,
-using **Reconfigure** later refreshes the official HomeControl name and metadata.
+available, the full MAC address is used on its own. For cloud-imported entries, using
+**Reconfigure** later can refresh the official HomeControl name and metadata. Locally
+configured entries remain cloud-independent.
 
 ### Lamp availability
 
@@ -201,7 +249,7 @@ can be configured from **10 to 300 seconds** in the integration options.
 
 ## Options
 
-The account-wide options include the default transition, BLE idle-disconnect time,
+The config-entry-wide options include the default transition, BLE idle-disconnect time,
 maximum concurrent lamp commands, and the **availability timeout**. The availability
 timeout defaults to **30 seconds** and accepts values from **10 to 300 seconds**.
 

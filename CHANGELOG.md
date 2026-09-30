@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-09-30
+
+### Added
+
+- Optional fully local setup using known mesh name/password, without a HomeControl cloud login or cloud dependency during setup.
+- A 30-second discovery window, repeatable searches, device selection and manual MAC-address / 16-bit mesh-ID entry.
+- Explicit active-scan requests when supported by Home Assistant, with normal advertisement collection as the compatibility fallback.
+- Local authentication of selected lamps with a 20-second timeout per lamp and at most two simultaneous checks. Successful checks are reused within the setup dialog.
+- Local Reconfigure for refreshing mesh credentials, adding lamps and correcting mesh IDs that conflict with observed advertisements.
+- Clear no-results, per-device verification and recoverable active-scan error messages in German and English.
+
+### Changed
+
+- Existing cloud-imported entries remain supported without reconfiguration; normal command handling, availability and saved options are unchanged.
+- Local meshes use stable entry identifiers independent of their editable credentials. Additional lamps with the same local credentials are added to the existing local entry.
+- Cloud import and cloud Reconfigure filter devices already owned by another entry and request confirmation when lamps are skipped.
+- Local setup checks device ownership again after authentication and closes matching Bluetooth discovery cards for newly added lamps.
+- Fresh advertisement timestamps are required for automatic search results. Rescans preserve selection for retained devices and preserve manually assigned names.
+- Known mesh-ID contradictions remain visible until corrected, even without a current long advertisement. Mesh credentials are validated against the protocol's 16-byte UTF-8 limit before connecting.
+- Bluetooth discovery supports both cloud-imported and locally configured meshes and can rediscover devices after an initial attempt without a configured entry.
+
+### Fixed
+
+- Active-scan API failures are reported in the setup dialog while normal advertisement collection continues for the remaining search window; searches can be retried and cancellation still propagates.
+
 ## [1.5.0] - 2026-09-30
 
 ### Added

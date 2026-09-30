@@ -10,6 +10,10 @@ CONF_OWNER_ID = "owner_id"
 CONF_DEVICES = "devices"
 CONF_MESH_NAME = "mesh_name"
 CONF_MESH_PASSWORD = "mesh_password"
+CONF_SETUP_METHOD = "setup_method"
+
+SETUP_METHOD_CLOUD = "cloud"
+SETUP_METHOD_LOCAL = "local"
 
 CONF_DEFAULT_TRANSITION = "default_transition"
 CONF_IDLE_DISCONNECT = "idle_disconnect"

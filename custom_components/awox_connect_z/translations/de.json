@@ -3,11 +3,15 @@
   "config": {
     "step": {
       "user": {
-        "title": "AwoX / EGLO HomeControl anmelden",
-        "description": "Melde dich einmal mit deinem AwoX-/EGLO-HomeControl-Konto an. Alle kompatiblen BLE-Lampen aus deinem Konto werden automatisch importiert. Das Konto-Passwort und der Cloud-Session-Token werden nicht gespeichert.",
-        "data": {
-          "email": "E-Mail-Adresse",
-          "password": "Passwort"
+        "title": "AwoX Connect.Z einrichten",
+        "description": "Wähle, ob die Mesh-Daten automatisch über AwoX / EGLO HomeControl importiert oder vollständig lokal eingerichtet werden sollen.",
+        "menu_options": {
+          "cloud": "Über AwoX / EGLO HomeControl",
+          "local": "Lokal mit Mesh-Zugangsdaten"
+        },
+        "menu_option_descriptions": {
+          "cloud": "Importiert kompatible Lampen, Mesh-Adressen und Mesh-Zugangsdaten automatisch aus dem HomeControl-Konto.",
+          "local": "Kein Cloud-Login. Verwende den Mesh-Namen und das Mesh-Passwort direkt und wähle erkannte Lampen oder gib MAC und Mesh-ID manuell ein."
         }
       },
       "reconfigure": {
@@ -21,6 +25,97 @@
       "bluetooth_confirm": {
         "title": "Neue AwoX Connect.Z Lampe entdeckt",
         "description": "Home Assistant hat **{name}** mit der Mesh-Adresse **{mesh_id}** entdeckt. Beim Hinzufügen wird lokal geprüft, ob die Lampe zu einem bereits konfigurierten AwoX-Mesh gehört. Es werden keine Cloud-Zugangsdaten benötigt."
+      },
+      "cloud": {
+        "title": "AwoX / EGLO HomeControl anmelden",
+        "description": "Melde dich einmal mit deinem AwoX-/EGLO-HomeControl-Konto an. Alle kompatiblen BLE-Lampen aus deinem Konto werden automatisch importiert. Das Konto-Passwort und der Cloud-Session-Token werden nicht gespeichert.",
+        "data": {
+          "email": "E-Mail-Adresse",
+          "password": "Passwort"
+        }
+      },
+      "local": {
+        "title": "Lokales AwoX-Mesh einrichten",
+        "description": "Gib den **bereits vorhandenen** Mesh-Namen und das Mesh-Passwort ein. Die Integration liest diese Zugangsdaten nicht aus der Lampe aus und erstellt/provisioniert kein neues Mesh. Danach sucht Home Assistant automatisch nach passenden Connect.Z Lampen. Es wird kein Cloud-Login verwendet.",
+        "data": {
+          "mesh_name": "Mesh-Name",
+          "mesh_password": "Mesh-Passwort"
+        }
+      },
+      "local_manual": {
+        "title": "Connect.Z Lampe manuell hinzufügen",
+        "description": "Fallback für eine Lampe, die während der automatischen Suche kein vollständiges Long-Advertisement gesendet hat. Gib MAC-Adresse und individuelle 16-Bit-Mesh-ID ein. Die bekannten Mesh-Zugangsdaten werden lokal geprüft. Eine erfolgreiche Prüfung wird für diesen Dialog gemerkt und beim abschließenden Speichern nicht noch einmal ausgeführt.",
+        "data": {
+          "name": "Name (optional)",
+          "mac": "Bluetooth-MAC-Adresse",
+          "mesh_id": "Mesh-ID (z. B. 0xD361)"
+        }
+      },
+      "reconfigure_local": {
+        "title": "Lokales AwoX-Mesh neu konfigurieren",
+        "description": "Aktualisiere die **bereits vorhandenen** Mesh-Zugangsdaten. Die Integration liest sie nicht aus den Lampen aus und provisioniert kein neues Mesh. Die neuen Daten werden lokal an mindestens einer vorhandenen Lampe geprüft; danach können weitere Lampen automatisch gesucht oder manuell hinzugefügt werden.",
+        "data": {
+          "mesh_name": "Mesh-Name",
+          "mesh_password": "Mesh-Passwort"
+        }
+      },
+      "local_devices": {
+        "title": "Lampen für das lokale Mesh auswählen",
+        "description": "Die Liste enthält **{count}** Kandidat(en). Automatisch erkannte Geräte werden nur übernommen, wenn während des aktuellen **{seconds}-Sekunden-Suchfensters** ein frisches vollständiges Long-Advertisement gesehen wurde. Manuell hinzugefügte Geräte und bereits erkannte Mesh-ID-Konflikte bleiben absichtlich in der Liste erhalten.",
+        "data": {
+          "devices": "Lampen",
+          "manual_add": "Weitere Lampe manuell hinzufügen",
+          "rescan": "Erneut 30 Sekunden suchen"
+        },
+        "data_description": {
+          "manual_add": "Nach dem Absenden öffnet sich die manuelle Eingabe. Danach kehrst du zu dieser Liste zurück und kannst weitere Lampen hinzufügen oder die Einrichtung abschließen.",
+          "rescan": "Startet im selben Einrichtungsdialog eine weitere aktive Suche. Neu gefundene Lampen werden automatisch zur Auswahl hinzugefügt."
+        }
+      },
+      "reconfigure_local_devices": {
+        "title": "Geräte im lokalen Mesh verwalten",
+        "description": "Im Hub sind bereits **{existing_count}** Lampe(n) eingerichtet. Die Liste enthält **{count}** neue oder zu korrigierende Kandidat(en). Automatische Treffer stammen aus dem aktuellen **{seconds}-Sekunden-Suchfenster**; manuelle Kandidaten und bekannte Mesh-ID-Konflikte dürfen über einen erneuten Scan hinweg erhalten bleiben.",
+        "data": {
+          "devices": "Neue Lampen",
+          "manual_add": "Weitere Lampe manuell hinzufügen",
+          "rescan": "Erneut 30 Sekunden suchen"
+        },
+        "data_description": {
+          "rescan": "Startet im selben Dialog eine weitere aktive 30-Sekunden-Suche. Neu gefundene Lampen werden automatisch zur Auswahl hinzugefügt.",
+          "manual_add": "Öffnet die manuelle Eingabe für MAC-Adresse und Mesh-ID. Danach kehrst du zu diesem Dialog zurück."
+        }
+      },
+      "cloud_review": {
+        "title": "Cloud-Import prüfen",
+        "description": "Das Konto enthält **{import_count}** neue Lampe(n), die importiert werden können. **{skipped_count}** bereits in einem anderen AwoX Connect.Z Eintrag eingerichtete Lampe(n) werden übersprungen. Mit Fortfahren wird nur der neue Teil importiert."
+      },
+      "reconfigure_cloud_review": {
+        "title": "Cloud-Neukonfiguration prüfen",
+        "description": "Nach der Aktualisierung bleiben **{import_count}** Lampe(n) in diesem Cloud-Eintrag. **{skipped_count}** Lampe(n), die inzwischen von einem anderen AwoX Connect.Z Eintrag verwaltet werden, werden übersprungen. Mit Fortfahren wird die Lampenliste entsprechend aktualisiert."
+      },
+      "local_devices_empty": {
+        "title": "Lampen für das lokale Mesh auswählen",
+        "description": "Home Assistant hat **{seconds} Sekunden** aktiv gesucht. **Keine passenden Connect.Z Lampen gefunden.** Alte Bluetooth-Cache-Einträge werden nicht als neue Treffer übernommen. Du kannst erneut suchen oder eine Lampe manuell hinzufügen.",
+        "data": {
+          "rescan": "Erneut 30 Sekunden suchen",
+          "manual_add": "Weitere Lampe manuell hinzufügen"
+        },
+        "data_description": {
+          "rescan": "Startet im selben Dialog eine weitere aktive 30-Sekunden-Suche. Neu gefundene Lampen werden automatisch zur Auswahl hinzugefügt.",
+          "manual_add": "Öffnet die manuelle Eingabe für MAC-Adresse und Mesh-ID. Danach kehrst du zu diesem Dialog zurück."
+        }
+      },
+      "reconfigure_local_devices_empty": {
+        "title": "Geräte im lokalen Mesh verwalten",
+        "description": "Im Hub sind bereits **{existing_count}** Lampe(n) eingerichtet. Home Assistant hat **{seconds} Sekunden** aktiv nach weiteren oder zu korrigierenden Geräten gesucht. **Keine passenden Connect.Z Lampen gefunden.** Du kannst erneut suchen oder eine Lampe manuell hinzufügen.",
+        "data": {
+          "rescan": "Erneut 30 Sekunden suchen",
+          "manual_add": "Weitere Lampe manuell hinzufügen"
+        },
+        "data_description": {
+          "rescan": "Startet im selben Dialog eine weitere aktive 30-Sekunden-Suche. Neu gefundene Lampen werden automatisch zur Auswahl hinzugefügt.",
+          "manual_add": "Öffnet die manuelle Eingabe für MAC-Adresse und Mesh-ID. Danach kehrst du zu diesem Dialog zurück."
+        }
       }
     },
     "error": {
@@ -29,17 +124,38 @@
       "no_devices": "Im AwoX-Konto wurden keine kompatiblen BLE-Lampen gefunden.",
       "unknown": "Beim Import ist ein unerwarteter Fehler aufgetreten.",
       "not_same_mesh": "Die Lampe konnte mit keinem der bereits gespeicherten lokalen AwoX-Mesh-Zugänge authentifiziert werden. Sie gehört wahrscheinlich zu einem anderen Mesh oder ist noch nicht in der AwoX-App provisioniert.",
-      "device_unavailable": "Die lokale Bluetooth-Verbindung zur Lampe konnte gerade nicht zuverlässig hergestellt werden. Schließe gegebenenfalls die AwoX-App und versuche es erneut."
+      "device_unavailable": "Die lokale Bluetooth-Verbindung zur Lampe konnte gerade nicht zuverlässig hergestellt werden. Schließe gegebenenfalls die AwoX-App und versuche es erneut.",
+      "invalid_mesh_credentials": "Die Lampe hat den eingegebenen Mesh-Namen oder das Mesh-Passwort abgelehnt.",
+      "invalid_mac": "Die Bluetooth-MAC-Adresse ist ungültig.",
+      "invalid_mesh_id": "Die Mesh-ID muss zwischen 1 und 65534 liegen. Erlaubt sind Dezimalwerte oder Hexadezimalwerte wie 0xD361.",
+      "no_selection": "Wähle mindestens eine Lampe aus.",
+      "mesh_id_mismatch": "Die eingegebene Mesh-ID stimmt nicht mit der aktuell von dieser Lampe beworbenen Mesh-ID überein.",
+      "cloud_devices_already_configured": "Alle Lampen dieses Cloud-Kontos sind bereits in einem anderen AwoX Connect.Z Eintrag eingerichtet. Dieselbe Lampe kann nicht gleichzeitig lokal und über einen zweiten Integrationseintrag verwaltet werden.",
+      "device_unavailable_named": "Die Lampe **{failed_device}** konnte für die lokale Authentifizierung nicht erreicht werden. Prüfe Stromversorgung, Bluetooth-Reichweite und ob eine andere App die Lampe verbunden hält.",
+      "invalid_mesh_credentials_named": "Die Mesh-Zugangsdaten wurden von {failed_device} abgelehnt.",
+      "device_already_configured_named": "Die Lampe {failed_device} ist bereits in einem anderen AwoX Connect.Z Eintrag eingerichtet.",
+      "mesh_id_mismatch_named": "Die Mesh-ID von {failed_device} widerspricht dem aktuellen Advertisement: gespeichert/manuell **{entered_mesh_id}**, Advertisement **{advertised_mesh_id}**. Bitte die Lampe manuell mit der korrekten Mesh-ID eintragen.",
+      "devices_unavailable_named": "Folgende ausgewählte Lampen konnten für die lokale Authentifizierung nicht erreicht werden: **{failed_device}**. Prüfe Stromversorgung, Bluetooth-Reichweite und ob eine andere App die Lampe verbunden hält.",
+      "mesh_credentials_rejected_named": "Die Mesh-Zugangsdaten wurden von folgenden Lampen abgelehnt: **{failed_device}**.",
+      "local_verification_failed_named": "Mehrere lokale Prüfungen sind fehlgeschlagen. Nicht erreichbar: **{unavailable_devices}**. Mesh-Zugangsdaten abgelehnt: **{rejected_devices}**.",
+      "mesh_credential_required": "Dieses Feld darf nicht leer sein.",
+      "mesh_credential_invalid": "Dieser Wert kann nicht als UTF-8 verarbeitet werden.",
+      "mesh_credential_too_long": "Maximal 16 UTF-8-Bytes sind erlaubt. Umlaute und Sonderzeichen können mehr als ein Byte belegen.",
+      "active_scan_failed": "Der aktive Bluetooth-Scan konnte nicht gestartet oder abgeschlossen werden. Home Assistant hat für den restlichen Suchzeitraum mit der normalen Bluetooth-Erfassung weitergesucht. Du kannst die Suche erneut starten."
     },
     "abort": {
       "already_configured": "Dieses AwoX-Konto ist bereits eingerichtet.",
       "wrong_account": "Die eingegebenen Zugangsdaten gehören zu einem anderen AwoX-Konto. Der vorhandene Eintrag wurde nicht geändert.",
       "reconfigure_successful": "AwoX-Kontodaten und Lampenliste wurden erfolgreich aktualisiert.",
-      "account_required": "Für Advertisement-Discovery muss zuerst mindestens ein AwoX Connect.Z Konto in Home Assistant eingerichtet sein.",
+      "account_required": "Für Advertisement-Discovery muss zuerst mindestens ein AwoX Connect.Z Cloud-Konto oder lokales Mesh eingerichtet sein. Dieses Gerät darf nach der Einrichtung durch ein späteres Advertisement erneut erkannt werden.",
       "device_already_configured": "Diese AwoX Connect.Z Lampe ist bereits in Home Assistant eingerichtet.",
       "incomplete_advertisement": "Es konnte noch kein vollständiges Connect.Z Status-Advertisement mit gültiger Mesh-Adresse empfangen werden.",
       "identity_mismatch": "Die Identitätsdaten im Advertisement passen nicht zur Bluetooth-Adresse.",
-      "device_added": "Die Lampe **{name}** wurde erfolgreich hinzugefügt."
+      "device_added": "Die Lampe **{name}** wurde erfolgreich hinzugefügt.",
+      "no_local_devices": "Aktuell wurde keine noch nicht konfigurierte Connect.Z Lampe mit vollständigem Long-Advertisement gefunden. Du kannst die Gerätedaten stattdessen manuell eingeben.",
+      "local_setup_incomplete": "Die lokale Einrichtung ist unvollständig. Starte den Einrichtungsdialog erneut.",
+      "local_devices_added": "{count} Lampe(n) wurden zum bereits vorhandenen lokalen Mesh hinzugefügt.",
+      "device_configured_during_setup": "Die Lampe **{device}** wurde während dieses Einrichtungsdialogs bereits von einem anderen AwoX Connect.Z Eintrag übernommen. Es wurde kein doppelter Eintrag gespeichert."
     }
   },
   "options": {
@@ -53,7 +169,7 @@
           "availability_timeout": "Nicht verfügbar nach (Sekunden)"
         },
         "data_description": {
-          "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für dieses Konto gleichzeitig laufen dürfen (1-32). Höhere Werte benötigen ausreichend freie Bluetooth-Verbindungskapazität.",
+          "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für diesen Mesh-Eintrag gleichzeitig laufen dürfen (1-32). Höhere Werte benötigen ausreichend freie Bluetooth-Verbindungskapazität.",
           "availability_timeout": "Zeit ohne Bluetooth-Lebenszeichen oder funktionierende HA-Verbindung, nach der eine Lampe als nicht verfügbar gilt (10–300 Sekunden)."
         }
       }
