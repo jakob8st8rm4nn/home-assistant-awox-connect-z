@@ -31,6 +31,7 @@ from .const import (
     DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_NAME,
     DEFAULT_TRANSITION,
+    DATA_RUNTIME_CONNECT_LOCK,
     MAX_AVAILABILITY_TIMEOUT,
     MAX_CONCURRENT_COMMANDS,
     MIN_AVAILABILITY_TIMEOUT,
@@ -114,6 +115,16 @@ async def async_setup_entry(
     )
     command_semaphore = asyncio.Semaphore(max_concurrent_commands)
 
+    # ESPHome Bluetooth Proxy can accept multiple client requests while only
+    # promoting one new BLE connection at a time. Serialize only the actual
+    # runtime connection-establishment phase across all AwoX config entries so
+    # a queued client does not burn its own connect timeout inside the proxy.
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    runtime_connect_lock = domain_data.get(DATA_RUNTIME_CONNECT_LOCK)
+    if runtime_connect_lock is None:
+        runtime_connect_lock = asyncio.Lock()
+        domain_data[DATA_RUNTIME_CONNECT_LOCK] = runtime_connect_lock
+
     availability_timeout = max(
         MIN_AVAILABILITY_TIMEOUT,
         min(
@@ -166,6 +177,7 @@ async def async_setup_entry(
             ),
             command_semaphore=command_semaphore,
             max_concurrent_commands=max_concurrent_commands,
+            runtime_connect_lock=runtime_connect_lock,
             availability_timeout=availability_timeout,
         )
         clients.append((client, dict(device)))
@@ -238,9 +250,13 @@ async def async_setup_entry(
         _LOGGER.error(
             "AwoX config entry contains no usable lamp records with MAC and mesh ID"
         )
+        if not any(
+            key != DATA_RUNTIME_CONNECT_LOCK for key in domain_data
+        ):
+            hass.data.pop(DOMAIN)
         return False
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = clients
+    domain_data[entry.entry_id] = clients
     await hass.config_entries.async_forward_entry_setups(
         entry, PLATFORMS
     )
@@ -255,11 +271,16 @@ async def async_unload_entry(
         entry, PLATFORMS
     )
     if unloaded:
-        clients = hass.data[DOMAIN].pop(entry.entry_id)
+        domain_data = hass.data[DOMAIN]
+        clients = domain_data.pop(entry.entry_id)
         for client, _device in clients:
             await client.async_close()
 
-        if not hass.data[DOMAIN]:
+        # Keep the shared runtime-connect lock only while at least one AwoX
+        # config entry is loaded.
+        if not any(
+            key != DATA_RUNTIME_CONNECT_LOCK for key in domain_data
+        ):
             hass.data.pop(DOMAIN)
 
     return unloaded

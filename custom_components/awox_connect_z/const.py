@@ -23,7 +23,7 @@ CONF_AVAILABILITY_TIMEOUT = "availability_timeout"
 DEFAULT_NAME = "AwoX Connect.Z"
 DEFAULT_TRANSITION = 0.2
 DEFAULT_IDLE_DISCONNECT = 10.0
-DEFAULT_MAX_CONCURRENT_COMMANDS = 1
+DEFAULT_MAX_CONCURRENT_COMMANDS = 2
 
 # A lamp stays available while HA has a live BLE connection or a Bluetooth
 # packet has been seen within this configurable window.
@@ -33,6 +33,10 @@ MAX_AVAILABILITY_TIMEOUT = 300.0
 AVAILABILITY_RECOVERY_POLL = 1.0
 MIN_CONCURRENT_COMMANDS = 1
 MAX_CONCURRENT_COMMANDS = 32
+
+# Shared Home Assistant runtime data key for serializing new BLE connection
+# establishment across all loaded AwoX config entries.
+DATA_RUNTIME_CONNECT_LOCK = "_runtime_connect_lock"
 
 MIN_COLOR_TEMP_KELVIN = 2200
 MAX_COLOR_TEMP_KELVIN = 6500

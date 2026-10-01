@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.1] - 2026-10-01
+
+### Fixed
+
+- Serialize new runtime BLE connections across all loaded AwoX entries so a command waiting behind another AwoX connection attempt does not consume its own connection timeout inside the proxy. Already-connected lamps can still process commands in parallel.
+- Separate the 30-second connection-gate queue timeout from the 30-second active command budget. Keep 12/4/4-second connect/authentication/write limits and protected disconnect cleanup with its own 12-second budget.
+- Use direct runtime connection calls instead of the connector's internal retry loop, and fail immediately when no Bluetooth device entry exists. Setup and Reconfigure keep their existing connection path.
+- Preserve BLE service-cache use and allow targeted recovery for recognizable missing/invalid GATT services or characteristics. Generic transport errors and authentication timeouts do not trigger cache recovery; disabling the cache option does not guarantee that all remote cache data is erased.
+- Limit command writes to two attempts. A failed recovery connection ends the command; recovery connections use the shared connection gate as well.
+- Retain client ownership and locks until bounded disconnect cleanup completes, including failed/pending connects and cancellation of the calling command.
+
+### Changed
+
+- Raise the default Max Concurrent Commands from 1 to 2. Explicitly saved values are retained; entries without a saved value use the new default.
+- Explain connection coordination in the German and English options text.
+
+### Documentation
+
+- Shorten the README and upgrade guidance while retaining setup, settings and troubleshooting instructions.
+- Document the known advertisement-history issue affecting HA 2026.9.4 and the upstream correction in habluetooth 7.0.0.
+- Add conditional ESPHome `connection_timeout: 10s` guidance for long waits involving unreachable lamps, including its effects on other BLE devices.
+
 ## [1.6.0] - 2026-09-30
 
 ### Added

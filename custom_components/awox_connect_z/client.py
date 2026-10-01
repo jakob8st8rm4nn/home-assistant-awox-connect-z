@@ -28,7 +28,13 @@ from .protocol import encrypt_command, make_pair_packet, make_session_key
 _LOGGER = logging.getLogger(__name__)
 
 DISCOVERY_ATTEMPTS = 5
-COMMAND_ATTEMPTS = 3
+RUNTIME_WRITE_ATTEMPTS = 2
+RUNTIME_COMMAND_TIMEOUT = 30.0
+RUNTIME_CONNECT_TIMEOUT = 12.0
+RUNTIME_CONNECT_QUEUE_TIMEOUT = 30.0
+RUNTIME_AUTH_TIMEOUT = 4.0
+RUNTIME_WRITE_TIMEOUT = 4.0
+DISCONNECT_TIMEOUT = 12.0
 
 
 class AwoxConnectZError(HomeAssistantError):
@@ -57,6 +63,7 @@ class AwoxConnectZClient:
         idle_disconnect: float,
         command_semaphore: asyncio.Semaphore,
         max_concurrent_commands: int,
+        runtime_connect_lock: asyncio.Lock | None = None,
         availability_timeout: float = DEFAULT_AVAILABILITY_TIMEOUT,
     ) -> None:
         self.hass = hass
@@ -68,6 +75,10 @@ class AwoxConnectZClient:
         self.availability_timeout = max(0.0, float(availability_timeout))
         self.max_concurrent_commands = max(1, int(max_concurrent_commands))
         self._command_semaphore = command_semaphore
+        # Runtime clients created by async_setup_entry share one lock across all
+        # AwoX config entries. Config-flow verifier clients may omit it because
+        # they keep the separate robust setup/reconfigure connection path.
+        self._runtime_connect_lock = runtime_connect_lock or asyncio.Lock()
 
         self._client: Any | None = None
         self._session_key: bytes | None = None
@@ -233,6 +244,54 @@ class AwoxConnectZClient:
         for listener in tuple(self._advertisement_listeners):
             listener(state)
 
+    @staticmethod
+    def _is_cache_service_error(err: Exception) -> bool:
+        """Return whether an error specifically points to stale GATT services."""
+        class_name = err.__class__.__name__
+        if class_name in {
+            "BleakCharacteristicNotFoundError",
+            "BleakServiceNotFoundError",
+        }:
+            return True
+
+        message = str(err).lower()
+        characteristic_missing = (
+            "characteristic" in message
+            and (
+                "not found" in message
+                or "could not be found" in message
+                or "does not exist" in message
+            )
+        )
+        service_missing = (
+            "service" in message
+            and (
+                "not found" in message
+                or "could not be found" in message
+                or "does not exist" in message
+            )
+        )
+        stale_handle = (
+            "invalid handle" in message
+            or "attribute not found" in message
+        )
+        return characteristic_missing or service_missing or stale_handle
+
+    def _async_find_device_runtime(self) -> Any:
+        """Return the currently known HA Bluetooth device without retry sleeps."""
+        device = async_ble_device_from_address(
+            self.hass, self.mac, connectable=True
+        )
+        if device is None:
+            device = async_ble_device_from_address(
+                self.hass, self.mac, connectable=False
+            )
+        if device is None:
+            raise AwoxDeviceNotFound(
+                f"AwoX Connect.Z {self.mac} has no current Bluetooth device entry"
+            )
+        return device
+
     async def _async_find_device(self) -> Any:
         for attempt in range(1, DISCOVERY_ATTEMPTS + 1):
             device = async_ble_device_from_address(
@@ -288,7 +347,59 @@ class AwoxConnectZClient:
             mesh_name, mesh_password, session_random, reply[1:9]
         )
 
-    async def _async_ensure_connected(self) -> None:
+    async def _async_acquire_runtime_connect_lock(
+        self,
+        command_timeout: asyncio.Timeout | None,
+    ) -> None:
+        """Acquire the shared runtime-connect slot outside command budget."""
+        loop = asyncio.get_running_loop()
+        wait_started = loop.time()
+
+        # The 30-second command budget is intended for actual runtime work.
+        # Suspend it while this command merely waits behind another AwoX BLE
+        # connection attempt; the queue has its own bounded timeout instead.
+        previous_deadline: float | None = None
+        command_budget_suspended = False
+        if command_timeout is not None and not command_timeout.expired():
+            previous_deadline = command_timeout.when()
+            if previous_deadline is not None:
+                command_timeout.reschedule(None)
+                command_budget_suspended = True
+
+        try:
+            try:
+                async with asyncio.timeout(RUNTIME_CONNECT_QUEUE_TIMEOUT):
+                    await self._runtime_connect_lock.acquire()
+            except TimeoutError as err:
+                raise AwoxConnectZError(
+                    "Timed out after "
+                    f"{RUNTIME_CONNECT_QUEUE_TIMEOUT:.1f}s waiting for the "
+                    "AwoX runtime BLE connection queue"
+                ) from err
+        finally:
+            if (
+                command_budget_suspended
+                and command_timeout is not None
+                and not command_timeout.expired()
+                and previous_deadline is not None
+            ):
+                waited = loop.time() - wait_started
+                command_timeout.reschedule(previous_deadline + waited)
+
+        waited = loop.time() - wait_started
+        if waited >= 0.05:
+            _LOGGER.debug(
+                "AwoX %s waited %.3fs for shared runtime BLE connect slot",
+                self.mac,
+                waited,
+            )
+
+    async def _async_ensure_connected(
+        self,
+        *,
+        fast_runtime: bool = False,
+        runtime_command_timeout: asyncio.Timeout | None = None,
+    ) -> None:
         if self._closed:
             raise AwoxConnectZError("AwoX client is closed")
         if self.connected and self._session_key is not None:
@@ -299,23 +410,133 @@ class AwoxConnectZClient:
                 return
 
             await self._async_disconnect(cancel_idle=False)
-            device = await self._async_find_device()
+
+            if not fast_runtime:
+                # Setup/reconfigure credential verification keeps the existing
+                # robust connector behavior. The config flow has its own
+                # 20-second overall verification timeout.
+                device = await self._async_find_device()
+                try:
+                    client = await establish_connection(
+                        BleakClientWithServiceCache,
+                        device,
+                        device.name or f"AwoX Connect.Z {self.mac}",
+                        max_attempts=4,
+                    )
+                    self._client = client
+                    await self._async_authenticate()
+                    self.last_error = None
+                    self._async_note_connection_liveness()
+                    _LOGGER.debug(
+                        "Authenticated AwoX Connect.Z %s", self.mac
+                    )
+                    return
+                except Exception:
+                    await self._async_disconnect(cancel_idle=False)
+                    raise
+
+            # Runtime light commands deliberately bypass the retry loop in
+            # bleak-retry-connector. Home Assistant still chooses the BLEDevice
+            # (and therefore the adapter/proxy), while this path performs one
+            # direct BleakClient.connect() call per requested runtime session.
+            #
+            # Use the service cache by default for fast cold starts. If the BLE
+            # link succeeds but authentication fails for a non-credential
+            # reason, retry once without cache to recover from stale services.
+            device = self._async_find_device_runtime()
+
+            async def _connect_once(*, use_cache: bool) -> None:
+                await self._async_acquire_runtime_connect_lock(
+                    runtime_command_timeout
+                )
+                try:
+                    client = BleakClientWithServiceCache(
+                        device,
+                        _is_retry_client=True,
+                    )
+                    self._client = client
+
+                    try:
+                        async with asyncio.timeout(RUNTIME_CONNECT_TIMEOUT):
+                            await client.connect(
+                                timeout=RUNTIME_CONNECT_TIMEOUT,
+                                dangerous_use_bleak_cache=use_cache,
+                            )
+                    except asyncio.CancelledError:
+                        # Keep the shared connection-establishment slot until
+                        # bounded proxy cleanup has completed.
+                        await self._async_disconnect(cancel_idle=False)
+                        raise
+                    except TimeoutError as err:
+                        await self._async_disconnect(cancel_idle=False)
+                        raise AwoxConnectZError(
+                            f"Runtime BLE connect timed out after "
+                            f"{RUNTIME_CONNECT_TIMEOUT:.1f}s"
+                        ) from err
+                    except Exception as err:
+                        await self._async_disconnect(cancel_idle=False)
+                        raise AwoxConnectZError(
+                            f"Runtime BLE connect failed: {err}"
+                        ) from err
+                finally:
+                    self._runtime_connect_lock.release()
+
+            async def _authenticate_once() -> None:
+                try:
+                    async with asyncio.timeout(RUNTIME_AUTH_TIMEOUT):
+                        await self._async_authenticate()
+                except asyncio.CancelledError:
+                    await self._async_disconnect(cancel_idle=False)
+                    raise
+                except TimeoutError as err:
+                    raise AwoxConnectZError(
+                        f"Runtime AwoX authentication timed out after "
+                        f"{RUNTIME_AUTH_TIMEOUT:.1f}s"
+                    ) from err
+
+            await _connect_once(use_cache=True)
 
             try:
-                client = await establish_connection(
-                    BleakClientWithServiceCache,
-                    device,
-                    device.name or f"AwoX Connect.Z {self.mac}",
-                    max_attempts=4,
-                )
-                self._client = client
-                await self._async_authenticate()
-                self.last_error = None
-                self._async_note_connection_liveness()
-                _LOGGER.debug("Authenticated AwoX Connect.Z %s", self.mac)
-            except Exception:
+                await _authenticate_once()
+            except asyncio.CancelledError:
+                raise
+            except AwoxAuthenticationError:
+                # Wrong mesh credentials are not a cache problem.
                 await self._async_disconnect(cancel_idle=False)
                 raise
+            except Exception as cached_auth_error:
+                if not self._is_cache_service_error(cached_auth_error):
+                    # Timeouts, transport failures and other generic GATT
+                    # errors are not evidence of stale cached services.
+                    await self._async_disconnect(cancel_idle=False)
+                    raise
+
+                # Only an identifiable missing/invalid service or characteristic
+                # gets one recovery connection without the local Bleak cache.
+                # This is a recovery attempt, not a guarantee that a remote
+                # ESPHome service cache has been fully erased.
+                _LOGGER.debug(
+                    "Runtime GATT service cache looks stale for %s; "
+                    "retrying once without local BLE service cache: %s",
+                    self.mac,
+                    cached_auth_error,
+                )
+                await self._async_disconnect(cancel_idle=False)
+                await _connect_once(use_cache=False)
+                try:
+                    await _authenticate_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await self._async_disconnect(cancel_idle=False)
+                    raise
+
+            self.last_error = None
+            self._async_note_connection_liveness()
+            _LOGGER.debug(
+                "Authenticated AwoX Connect.Z %s via one-shot runtime connect",
+                self.mac,
+            )
 
     async def _async_disconnect(
         self,
@@ -330,27 +551,74 @@ class AwoxConnectZClient:
             self._idle_task = None
 
         client = self._client
-        self._client = None
         self._session_key = None
 
-        had_client = client is not None
-        was_connected = bool(client is not None and client.is_connected)
-        if was_connected:
-            with suppress(Exception):
-                await client.disconnect()
-            if mark_liveness:
-                self._async_note_connection_liveness()
+        if client is None:
+            return
 
-        if had_client:
-            # Home Assistant deduplicates identical advertisements. Clear the
-            # per-address history after every known GATT session, including when
-            # the BLE link already dropped unexpectedly before cleanup ran.
-            clear_history = getattr(
-                bluetooth, "async_clear_advertisement_history", None
-            )
-            if clear_history is not None:
-                with suppress(Exception):
-                    clear_history(self.hass, self.mac)
+        was_connected = bool(client.is_connected)
+
+        async def _cleanup_client() -> None:
+            try:
+                async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                    await client.disconnect()
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Timed out after %.1fs while disconnecting AwoX %s",
+                    DISCONNECT_TIMEOUT,
+                    self.mac,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                _LOGGER.debug(
+                    "Ignoring AwoX disconnect error for %s: %s",
+                    self.mac,
+                    err,
+                )
+
+        cleanup_task = self.hass.async_create_task(
+            _cleanup_client(),
+            f"AwoX Connect.Z disconnect cleanup {self.mac}",
+        )
+
+        cancelled = False
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                # The command budget or Home Assistant may cancel the caller,
+                # but the proxy cleanup must finish before we release the
+                # command semaphore / per-lamp lock.
+                cancelled = True
+                continue
+
+        # Consume any task exception. Ordinary disconnect errors are already
+        # handled inside _cleanup_client; a cancelled cleanup is treated like
+        # cancellation of the caller.
+        if cleanup_task.cancelled():
+            cancelled = True
+        else:
+            with suppress(Exception):
+                cleanup_task.result()
+
+        if self._client is client:
+            self._client = None
+
+        if was_connected and mark_liveness:
+            self._async_note_connection_liveness()
+
+        # Home Assistant deduplicates identical advertisements. Clear the
+        # per-address history only after the GATT cleanup has finished.
+        clear_history = getattr(
+            bluetooth, "async_clear_advertisement_history", None
+        )
+        if clear_history is not None:
+            with suppress(Exception):
+                clear_history(self.hass, self.mac)
+
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _schedule_idle_disconnect(self) -> None:
         if self._idle_task is not None:
@@ -384,6 +652,9 @@ class AwoxConnectZClient:
                 try:
                     await self._async_ensure_connected()
                     self.last_error = None
+                except asyncio.CancelledError:
+                    await self._async_disconnect(cancel_idle=True)
+                    raise
                 except Exception as err:
                     self.last_error = str(err)
                     raise
@@ -391,46 +662,128 @@ class AwoxConnectZClient:
                     await self._async_disconnect(cancel_idle=True)
 
     async def async_send_plain(self, plain16: bytes, *, label: str) -> None:
-        """Send one command, reconnecting and re-authenticating when needed."""
+        """Send one runtime command with bounded staged retries."""
         async with self._command_semaphore:
             async with self._command_lock:
-                last_exception: Exception | None = None
-
-                for attempt in range(1, COMMAND_ATTEMPTS + 1):
-                    try:
-                        await self._async_ensure_connected()
-                        if self._client is None or self._session_key is None:
-                            raise AwoxConnectZError(
-                                "AwoX session was not created"
-                            )
-
-                        packet = encrypt_command(self._session_key, plain16)
-                        await self._client.write_gatt_char(
-                            COMMAND_CHAR_UUID, packet, response=True
+                try:
+                    async with asyncio.timeout(
+                        RUNTIME_COMMAND_TIMEOUT
+                    ) as command_timeout:
+                        await self._async_send_plain_locked(
+                            plain16,
+                            label=label,
+                            runtime_command_timeout=command_timeout,
                         )
-                        self.last_error = None
-                        self.last_command = label
-                        self._async_note_connection_liveness()
-                        self._schedule_idle_disconnect()
-                        return
-                    except Exception as err:
-                        last_exception = err
-                        self.last_error = str(err)
-                        _LOGGER.debug(
-                            "AwoX command %s failed on attempt %s/%s: %s",
-                            label,
-                            attempt,
-                            COMMAND_ATTEMPTS,
-                            err,
-                        )
-                        await self._async_disconnect(cancel_idle=True)
-                        if attempt < COMMAND_ATTEMPTS:
-                            await asyncio.sleep(0.5 * attempt)
+                except asyncio.CancelledError:
+                    # Keep the integration slot and per-lamp lock until cleanup
+                    # has been attempted, then propagate the external cancel.
+                    await self._async_disconnect(cancel_idle=True)
+                    raise
+                except TimeoutError as err:
+                    await self._async_disconnect(cancel_idle=True)
+                    self.last_error = (
+                        f"Command '{label}' exceeded the "
+                        f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
+                    )
+                    raise AwoxConnectZError(self.last_error) from err
 
+    async def _async_send_plain_locked(
+        self,
+        plain16: bytes,
+        *,
+        label: str,
+        runtime_command_timeout: asyncio.Timeout,
+    ) -> None:
+        """Run one command while semaphore and per-lamp lock are already held."""
+        try:
+            await self._async_ensure_connected(
+                fast_runtime=True,
+                runtime_command_timeout=runtime_command_timeout,
+            )
+        except AwoxDeviceNotFound as err:
+            self.last_error = str(err)
+            raise AwoxConnectZError(
+                f"Command '{label}' failed during device lookup: {err}"
+            ) from err
+        except AwoxAuthenticationError as err:
+            self.last_error = str(err)
+            raise AwoxConnectZError(
+                f"Command '{label}' failed during authentication: {err}"
+            ) from err
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            self.last_error = str(err)
+            raise AwoxConnectZError(
+                f"Command '{label}' failed during BLE connect: {err}"
+            ) from err
+
+        last_exception: Exception | None = None
+
+        for attempt in range(1, RUNTIME_WRITE_ATTEMPTS + 1):
+            try:
+                if self._client is None or self._session_key is None:
+                    raise AwoxConnectZError(
+                        "AwoX session was not created"
+                    )
+
+                packet = encrypt_command(self._session_key, plain16)
+                async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT):
+                    await self._client.write_gatt_char(
+                        COMMAND_CHAR_UUID, packet, response=True
+                    )
+
+                self.last_error = None
+                self.last_command = label
+                self._async_note_connection_liveness()
+                self._schedule_idle_disconnect()
+                return
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError as err:
+                last_exception = AwoxConnectZError(
+                    f"GATT write timed out after "
+                    f"{RUNTIME_WRITE_TIMEOUT:.1f}s"
+                )
+                last_exception.__cause__ = err
+            except Exception as err:
+                last_exception = err
+
+            self.last_error = str(last_exception)
+            _LOGGER.debug(
+                "AwoX command write %s failed on attempt %s/%s: %s",
+                label,
+                attempt,
+                RUNTIME_WRITE_ATTEMPTS,
+                last_exception,
+            )
+            await self._async_disconnect(cancel_idle=True)
+
+            if attempt >= RUNTIME_WRITE_ATTEMPTS:
+                break
+
+            # Exactly one reconnect is allowed after the first write failure.
+            # If it fails, end the command immediately instead of allowing the
+            # write loop to trigger any further reconnect.
+            try:
+                await self._async_ensure_connected(
+                    fast_runtime=True,
+                    runtime_command_timeout=runtime_command_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as reconnect_err:
+                self.last_error = str(reconnect_err)
                 raise AwoxConnectZError(
-                    f"Command '{label}' failed after "
-                    f"{COMMAND_ATTEMPTS} attempts: {last_exception}"
-                ) from last_exception
+                    f"Command '{label}' write failed; "
+                    f"reconnect failed: {reconnect_err}"
+                ) from reconnect_err
+
+        raise AwoxConnectZError(
+            f"Command '{label}' failed after "
+            f"{RUNTIME_WRITE_ATTEMPTS} write attempt(s): "
+            f"{last_exception}"
+        ) from last_exception
 
     async def async_close(self) -> None:
         """Stop timers and release the BLE connection."""
