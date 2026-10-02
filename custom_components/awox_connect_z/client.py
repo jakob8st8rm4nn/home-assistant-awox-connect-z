@@ -661,17 +661,34 @@ class AwoxConnectZClient:
                 finally:
                     await self._async_disconnect(cancel_idle=True)
 
-    async def async_send_plain(self, plain16: bytes, *, label: str) -> None:
-        """Send one runtime command with bounded staged retries."""
+    async def async_send_selected(
+        self,
+        selector: Callable[[], tuple[bytes, str] | None],
+    ) -> bool:
+        """Send one runtime command selected immediately before the GATT write.
+
+        Waiting for the command semaphore, per-lamp command lock, runtime connect
+        gate, BLE connection, or authentication does not freeze a pending target.
+        The selector is called only after a usable authenticated session exists.
+        Once selected, that command remains fixed across the bounded write retry.
+        """
+        selected_label: str | None = None
+
+        def _select() -> tuple[bytes, str] | None:
+            nonlocal selected_label
+            selected = selector()
+            if selected is not None:
+                selected_label = selected[1]
+            return selected
+
         async with self._command_semaphore:
             async with self._command_lock:
                 try:
                     async with asyncio.timeout(
                         RUNTIME_COMMAND_TIMEOUT
                     ) as command_timeout:
-                        await self._async_send_plain_locked(
-                            plain16,
-                            label=label,
+                        return await self._async_send_selected_locked(
+                            _select,
                             runtime_command_timeout=command_timeout,
                         )
                 except asyncio.CancelledError:
@@ -681,20 +698,25 @@ class AwoxConnectZClient:
                     raise
                 except TimeoutError as err:
                     await self._async_disconnect(cancel_idle=True)
-                    self.last_error = (
-                        f"Command '{label}' exceeded the "
-                        f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
-                    )
+                    if selected_label is None:
+                        self.last_error = (
+                            "AwoX command preparation exceeded the "
+                            f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
+                        )
+                    else:
+                        self.last_error = (
+                            f"Command '{selected_label}' exceeded the "
+                            f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
+                        )
                     raise AwoxConnectZError(self.last_error) from err
 
-    async def _async_send_plain_locked(
+    async def _async_send_selected_locked(
         self,
-        plain16: bytes,
+        selector: Callable[[], tuple[bytes, str] | None],
         *,
-        label: str,
         runtime_command_timeout: asyncio.Timeout,
-    ) -> None:
-        """Run one command while semaphore and per-lamp lock are already held."""
+    ) -> bool:
+        """Run one late-selected command while runtime locks are already held."""
         try:
             await self._async_ensure_connected(
                 fast_runtime=True,
@@ -703,21 +725,31 @@ class AwoxConnectZClient:
         except AwoxDeviceNotFound as err:
             self.last_error = str(err)
             raise AwoxConnectZError(
-                f"Command '{label}' failed during device lookup: {err}"
+                f"AwoX command preparation failed during device lookup: {err}"
             ) from err
         except AwoxAuthenticationError as err:
             self.last_error = str(err)
             raise AwoxConnectZError(
-                f"Command '{label}' failed during authentication: {err}"
+                f"AwoX command preparation failed during authentication: {err}"
             ) from err
         except asyncio.CancelledError:
             raise
         except Exception as err:
             self.last_error = str(err)
             raise AwoxConnectZError(
-                f"Command '{label}' failed during BLE connect: {err}"
+                f"AwoX command preparation failed during BLE connect: {err}"
             ) from err
 
+        # This is the write boundary for same-lamp coalescing. The entity may
+        # replace waiting requests right up to this synchronous callback. No
+        # await occurs between selection and construction of the first packet.
+        selected = selector()
+        if selected is None:
+            self.last_error = None
+            self._schedule_idle_disconnect()
+            return False
+
+        plain16, label = selected
         last_exception: Exception | None = None
 
         for attempt in range(1, RUNTIME_WRITE_ATTEMPTS + 1):
@@ -737,7 +769,7 @@ class AwoxConnectZClient:
                 self.last_command = label
                 self._async_note_connection_liveness()
                 self._schedule_idle_disconnect()
-                return
+                return True
             except asyncio.CancelledError:
                 raise
             except TimeoutError as err:
@@ -762,9 +794,9 @@ class AwoxConnectZClient:
             if attempt >= RUNTIME_WRITE_ATTEMPTS:
                 break
 
-            # Exactly one reconnect is allowed after the first write failure.
-            # If it fails, end the command immediately instead of allowing the
-            # write loop to trigger any further reconnect.
+            # The selected command is now genuinely in flight and remains fixed
+            # across the one allowed reconnect/write retry. The recovery connect
+            # still uses the shared runtime connection gate.
             try:
                 await self._async_ensure_connected(
                     fast_runtime=True,
@@ -784,6 +816,10 @@ class AwoxConnectZClient:
             f"{RUNTIME_WRITE_ATTEMPTS} write attempt(s): "
             f"{last_exception}"
         ) from last_exception
+
+    async def async_send_plain(self, plain16: bytes, *, label: str) -> None:
+        """Send one fixed runtime command through the late-selection path."""
+        await self.async_send_selected(lambda: (plain16, label))
 
     async def async_close(self) -> None:
         """Stop timers and release the BLE connection."""

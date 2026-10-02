@@ -33,7 +33,7 @@ review and device compatibility reports are welcome.
 - Power, brightness, hue/saturation color, tunable white and transitions.
 - HomeControl import, fully local setup and Reconfigure for lamp/mesh management.
 - Live state correction from BLE advertisements and configurable availability.
-- On-demand BLE connections, idle disconnect and configurable command concurrency.
+- On-demand BLE connections, idle disconnect, configurable command concurrency and same-lamp latest-wins command coalescing.
 - Bluetooth discovery of additional provisioned lamps and credential-redacted diagnostics.
 
 | Device | Cloud model | Firmware | Hardware | Tested functions |
@@ -52,12 +52,12 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.6.1:** Update and restart Home Assistant. Existing entries and saved
-options are retained; no reconfiguration is required for this update. The default
-command concurrency is now **2**, including existing entries without an explicitly
-saved value. Saved values remain unchanged. For older installations reporting a
-missing or invalid mesh destination, use **Reconfigure** to refresh lamp data.
-See [CHANGELOG.md](CHANGELOG.md) for version history.
+**Updating to 1.7.0:** Update and restart Home Assistant. Existing entries and saved
+options are retained; no reconfiguration is required. Rapid same-lamp changes now
+coalesce while they are still waiting, instead of building a FIFO backlog. The
+default command concurrency remains **2**; explicitly saved values remain unchanged.
+For older installations reporting a missing or invalid mesh destination, use
+**Reconfigure** to refresh lamp data. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Setup and lamp management
 
@@ -122,6 +122,25 @@ the 30-second active command budget. Connect/authentication/write stages have
 budget. These are per-command processing limits, not a guaranteed duration for an
 entire user action or a queue of actions. A failed initial connection stops that
 command; write failures and recognizable GATT cache problems allow limited recovery.
+
+**Same-lamp command coalescing:** Rapid changes retain the newest waiting brightness
+and the newest color or color temperature. An off request discards older waiting
+changes. Targets remain replaceable during connection preparation and are selected
+immediately before writing. A command already being written finishes its bounded
+retry handling before the next target is selected; off cannot interrupt that command.
+
+**Rapid off/on compatibility:** After a successful off write, commands that can turn
+the lamp back on wait until **500 ms since that write have elapsed**. The remaining
+time is checked again immediately before selection. This addresses the observed
+behavior where a rapid brightness command after off updates the value but leaves
+the tested lamp physically off. An off discarded before writing starts no delay;
+ordinary commands have no artificial debounce. A new off arriving during an already
+started settling wait can also wait for the remainder of that pause.
+
+Cancelled calls discard their unsent targets while newer requests are preserved,
+including during disconnect cleanup. Fully superseded calls can complete without
+their own value being written. Successful writes update state optimistically;
+valid advertisements subsequently correct the reported lamp state.
 
 **Availability and state:** A working BLE connection or recent Bluetooth packets
 count as liveness. Receiving packets does not guarantee that a GATT connection will

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-10-02
+
+### Added
+
+- Add per-lamp latest-wins command coalescing: keep the latest waiting brightness and color/color-temperature independently, and discard older waiting changes when off is requested.
+- Select the newest pending target immediately before its first GATT write, after command capacity and connection preparation. Already-started commands retain their bounded retry handling.
+- Add a 500 ms settling interval after a successfully written off before sending another command that can turn the lamp on, addressing the rapid off-to-brightness behavior observed on tested hardware. Re-check the remaining interval at late selection; discarded unsent off requests do not start it.
+
+### Reliability
+
+- Remove cancelled callers' unsent targets without dropping newer requests. Settle outstanding calls on worker cancellation or failure, including cancellation before the worker first runs.
+- Preserve new requests arriving during protected disconnect cleanup and start their successor only after the previous worker ends. Entity unload cancels pending work without restarting it.
+- Retain the v1.6.1 runtime connection gate, timeout budgets, bounded cleanup, service-cache recovery and saved concurrency options.
+
+### Documentation
+
+- Explain coalescing, cancellation, optimistic completion and the targeted settling interval. Existing entries require only an update and restart; no reconfiguration is needed.
+
 ## [1.6.1] - 2026-10-01
 
 ### Fixed
