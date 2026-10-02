@@ -174,5 +174,32 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "signal_strength": {
+        "name": "Signal Strength"
+      },
+      "last_seen": {
+        "name": "Last Seen"
+      },
+      "bluetooth_status": {
+        "name": "Bluetooth Status",
+        "state": {
+          "connected": "Connected",
+          "visible": "Visible",
+          "unreachable": "Unreachable"
+        }
+      },
+      "mesh_id": {
+        "name": "Mesh ID"
+      },
+      "current_bluetooth_source": {
+        "name": "Current Bluetooth Source"
+      },
+      "last_connection": {
+        "name": "Last Connection"
+      }
+    }
   }
 }

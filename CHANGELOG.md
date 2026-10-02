@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-10-03
+
+### Added
+
+- Add six diagnostic sensors per lamp: signal strength, last seen, Bluetooth status, mesh ID, current Bluetooth source and last connection source, with German and English translations.
+- Include Bluetooth diagnostic values in the downloadable integration diagnostics. Values use existing Bluetooth information without additional scans or lamp connections.
+
+### Reliability
+
+- Publish sensor values only when changed; sample small RSSI fluctuations at most every five seconds while reporting changes of at least 5 dBm immediately. Keep Last Seen stable until a newer advertisement timestamp is observed.
+- Keep Bluetooth Status unknown during startup without confirmed Bluetooth evidence, then report unreachable when the availability grace period expires without liveness.
+- Resolve the last connection source from connection tracking when available, with a best-effort fallback. Preserve the restored historical source until a new successful session is observed; leave an ambiguous new source unknown.
+- Isolate diagnostic-listener errors from lamp command handling. Retain the existing command coalescing, connection handling and post-off settling behavior.
+
 ## [1.7.0] - 2026-10-02
 
 ### Added

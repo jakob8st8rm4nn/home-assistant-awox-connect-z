@@ -8,13 +8,19 @@ import os
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from datetime import datetime, timedelta
 from typing import Any
 
-from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+from bleak_retry_connector import (
+    BleakClientWithServiceCache,
+    device_source,
+    establish_connection,
+)
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 
 from .advertisement import AwoxAdvertisementState
 from .const import (
@@ -102,6 +108,16 @@ class AwoxConnectZClient:
         self._availability_wakeup = asyncio.Event()
         self._availability_listeners: set[Callable[[bool], None]] = set()
 
+        self._diagnostic_listeners: set[Callable[[], None]] = set()
+        self._last_connection_source: str | None = None
+        self._last_connection_observed = False
+        self._last_seen_service_time: float | None = None
+        self._last_seen_wallclock: datetime | None = None
+        # Availability starts with a grace period so the light entity does not
+        # immediately flap unavailable after a reload. Diagnostics must not
+        # mistake that grace period for confirmed Bluetooth visibility.
+        self._bluetooth_liveness_confirmed = False
+
     @property
     def connected(self) -> bool:
         """Return current BLE connection state."""
@@ -120,6 +136,199 @@ class AwoxConnectZClient:
     def available(self) -> bool:
         """Return whether the lamp has recent Bluetooth liveness."""
         return not self._closed and self._available
+
+    def _latest_service_info(self) -> bluetooth.BluetoothServiceInfoBleak | None:
+        """Return Home Assistant's current best advertisement for this lamp."""
+        return bluetooth.async_last_service_info(
+            self.hass, self.mac, connectable=False
+        )
+
+    def bluetooth_source_name(self, source: str | None) -> str | None:
+        """Resolve a Bluetooth source MAC/ID to the scanner's friendly name."""
+        if not source:
+            return None
+
+        scanner = bluetooth.async_scanner_by_source(self.hass, source)
+        if scanner is not None:
+            name = getattr(scanner, "name", None)
+            if name:
+                return str(name)
+        return source
+
+    @property
+    def signal_strength(self) -> int | None:
+        """Return RSSI from the current best Bluetooth advertisement."""
+        if not self.available:
+            return None
+        service_info = self._latest_service_info()
+        return None if service_info is None else int(service_info.rssi)
+
+    @callback
+    def _async_update_last_seen(self, seen_time: float) -> bool:
+        """Cache one monotonic advertisement timestamp as a stable UTC value."""
+        seen_time = float(seen_time)
+        if (
+            self._last_seen_service_time is not None
+            and seen_time <= self._last_seen_service_time
+        ):
+            return False
+
+        # BluetoothServiceInfoBleak.time uses the event loop's monotonic clock.
+        # Convert it once when HA reports a newer packet instead of recalculating
+        # it on every entity read, which can otherwise introduce tiny jitter.
+        age = max(0.0, time.monotonic() - seen_time)
+        self._last_seen_service_time = seen_time
+        self._last_seen_wallclock = dt_util.utcnow() - timedelta(seconds=age)
+        return True
+
+    def _refresh_last_seen_from_ha(self) -> bool:
+        """Refresh cached Bluetooth evidence from HA's advertisement history."""
+        service_info = self._latest_service_info()
+        if service_info is None:
+            return False
+        self._bluetooth_liveness_confirmed = True
+        self._async_update_last_seen(float(service_info.time))
+        return True
+
+    @property
+    def last_seen(self) -> datetime | None:
+        """Return the stable wall-clock time of HA's newest advertisement."""
+        self._refresh_last_seen_from_ha()
+        return self._last_seen_wallclock
+
+    @property
+    def bluetooth_status(self) -> str | None:
+        """Return the confirmed Bluetooth path state for diagnostics.
+
+        Availability deliberately starts with a grace period after setup/reload.
+        Until an advertisement or successful GATT connection confirms actual
+        Bluetooth liveness, reporting ``visible`` would be misleading. Home
+        Assistant renders ``None`` as Unknown for the enum sensor.
+        """
+        if self.connected:
+            return "connected"
+
+        if not self._bluetooth_liveness_confirmed:
+            # HA can learn an advertisement without dispatching our integration
+            # callback (for example when an identical packet is deduplicated).
+            # Treat an advertisement present in HA's Bluetooth history as real
+            # visibility evidence as well.
+            self._refresh_last_seen_from_ha()
+
+        if self.available:
+            if self._bluetooth_liveness_confirmed:
+                return "visible"
+            return None
+        return "unreachable"
+
+    @property
+    def current_bluetooth_source(self) -> str | None:
+        """Return the scanner/proxy supplying HA's current best advertisement."""
+        if not self.available:
+            return None
+        service_info = self._latest_service_info()
+        if service_info is None:
+            return None
+        return self.bluetooth_source_name(str(service_info.source))
+
+    @property
+    def current_bluetooth_source_id(self) -> str | None:
+        """Return the raw source ID for HA's current best advertisement."""
+        if not self.available:
+            return None
+        service_info = self._latest_service_info()
+        if service_info is None:
+            return None
+        return str(service_info.source)
+
+    @property
+    def last_connection_source(self) -> str | None:
+        """Return the scanner/proxy used by the last successful GATT session."""
+        return self.bluetooth_source_name(self._last_connection_source)
+
+    @property
+    def last_connection_source_id(self) -> str | None:
+        """Return the raw source ID of the last successful GATT session."""
+        return self._last_connection_source
+
+    @property
+    def has_live_last_connection_result(self) -> bool:
+        """Return whether this runtime has completed a successful GATT session."""
+        return self._last_connection_observed
+
+    @callback
+    def async_add_diagnostic_listener(
+        self, listener: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Subscribe an entity to Bluetooth diagnostic changes."""
+        self._diagnostic_listeners.add(listener)
+
+        @callback
+        def _remove_listener() -> None:
+            self._diagnostic_listeners.discard(listener)
+
+        return _remove_listener
+
+    @callback
+    def _async_notify_diagnostic_listeners(self) -> None:
+        """Notify diagnostic entities without affecting BLE command handling."""
+        for listener in tuple(self._diagnostic_listeners):
+            try:
+                listener()
+            except Exception:  # diagnostics must never break a BLE operation
+                _LOGGER.exception(
+                    "AwoX Connect.Z diagnostic listener failed for %s", self.mac
+                )
+
+    def _actual_connection_source(self, client: Any | None) -> str | None:
+        """Best-effort source of the scanner that actually established the link."""
+        if client is None:
+            return None
+
+        # Home Assistant's habluetooth wrapper tracks the scanner selected at
+        # connect time. It may differ from the advertisement source that looked
+        # preferable before the connection (for example because a proxy had no
+        # free connection slot). Keep this access defensive because the wrapper
+        # implementation is not part of HA's stable integration API.
+        scanner = getattr(client, "_connected_scanner", None)
+        source = getattr(scanner, "source", None)
+        if source:
+            return str(source)
+
+        connected_device = getattr(client, "_connected_device", None)
+        if connected_device is not None:
+            try:
+                source = device_source(connected_device)
+            except Exception:
+                source = None
+            if source:
+                return str(source)
+
+        # Public-API fallback: one connectable path is unambiguous. If several
+        # scanners can reach the lamp we deliberately do not guess.
+        try:
+            paths = bluetooth.async_scanner_devices_by_address(
+                self.hass, self.mac, connectable=True
+            )
+        except Exception:
+            return None
+        if len(paths) == 1:
+            source = getattr(paths[0].scanner, "source", None)
+            if source:
+                return str(source)
+        return None
+
+    @callback
+    def _async_set_last_connection_source(self, source: str | None) -> None:
+        """Remember the actual scanner used by a successful GATT connection."""
+        changed = (
+            not self._last_connection_observed
+            or source != self._last_connection_source
+        )
+        self._last_connection_observed = True
+        self._last_connection_source = source
+        if changed:
+            self._async_notify_diagnostic_listeners()
 
     @callback
     def async_add_availability_listener(
@@ -143,23 +352,27 @@ class AwoxConnectZClient:
         self._available = available
         for listener in tuple(self._availability_listeners):
             listener(available)
+        self._async_notify_diagnostic_listeners()
 
     @callback
     def async_note_bluetooth_liveness(self, seen_time: float | None = None) -> None:
         """Record a Bluetooth packet and make the lamp available immediately."""
-        self._last_liveness = max(
-            self._last_liveness,
-            seen_time if seen_time is not None else time.monotonic(),
-        )
+        seen = seen_time if seen_time is not None else time.monotonic()
+        self._bluetooth_liveness_confirmed = True
+        self._last_liveness = max(self._last_liveness, seen)
+        self._async_update_last_seen(seen)
         self._async_set_available(True)
         self._availability_wakeup.set()
+        self._async_notify_diagnostic_listeners()
 
     @callback
     def _async_note_connection_liveness(self) -> None:
         """Record a known-good local GATT session as a liveness signal."""
+        self._bluetooth_liveness_confirmed = True
         self._last_liveness = time.monotonic()
         self._async_set_available(True)
         self._availability_wakeup.set()
+        self._async_notify_diagnostic_listeners()
 
     def _latest_liveness_time(self) -> float:
         """Return the newest packet/session liveness timestamp known to HA."""
@@ -168,7 +381,10 @@ class AwoxConnectZClient:
             self.hass, self.mac, connectable=False
         )
         if service_info is not None:
-            latest = max(latest, float(service_info.time))
+            self._bluetooth_liveness_confirmed = True
+            seen_time = float(service_info.time)
+            self._async_update_last_seen(seen_time)
+            latest = max(latest, seen_time)
         return latest
 
     @callback
@@ -210,7 +426,11 @@ class AwoxConnectZClient:
                             timeout=wait_seconds,
                         )
                     except TimeoutError:
-                        pass
+                        # HA may refresh BluetoothServiceInfoBleak.time for an
+                        # identical advertisement without dispatching the normal
+                        # integration callback. Re-evaluate diagnostic sensors on
+                        # this bounded availability cadence as well.
+                        self._async_notify_diagnostic_listeners()
             except asyncio.CancelledError:
                 return
             finally:
@@ -426,6 +646,9 @@ class AwoxConnectZClient:
                     self._client = client
                     await self._async_authenticate()
                     self.last_error = None
+                    self._async_set_last_connection_source(
+                        self._actual_connection_source(client)
+                    )
                     self._async_note_connection_liveness()
                     _LOGGER.debug(
                         "Authenticated AwoX Connect.Z %s", self.mac
@@ -444,7 +667,6 @@ class AwoxConnectZClient:
             # link succeeds but authentication fails for a non-credential
             # reason, retry once without cache to recover from stale services.
             device = self._async_find_device_runtime()
-
             async def _connect_once(*, use_cache: bool) -> None:
                 await self._async_acquire_runtime_connect_lock(
                     runtime_command_timeout
@@ -532,6 +754,9 @@ class AwoxConnectZClient:
                     raise
 
             self.last_error = None
+            self._async_set_last_connection_source(
+                self._actual_connection_source(self._client)
+            )
             self._async_note_connection_liveness()
             _LOGGER.debug(
                 "Authenticated AwoX Connect.Z %s via one-shot runtime connect",
@@ -604,6 +829,7 @@ class AwoxConnectZClient:
 
         if self._client is client:
             self._client = None
+            self._async_notify_diagnostic_listeners()
 
         if was_connected and mark_liveness:
             self._async_note_connection_liveness()
@@ -825,6 +1051,7 @@ class AwoxConnectZClient:
         """Stop timers and release the BLE connection."""
         self._closed = True
         self._availability_wakeup.set()
+        self._async_notify_diagnostic_listeners()
 
         if self._availability_task is not None:
             self._availability_task.cancel()
@@ -843,10 +1070,18 @@ class AwoxConnectZClient:
 
     def diagnostics(self) -> dict[str, Any]:
         """Safe diagnostics without credentials."""
+        last_seen = self.last_seen
         return {
             "mac": self.mac,
             "connected": self.connected,
             "available": self.available,
+            "bluetooth_status": self.bluetooth_status,
+            "signal_strength": self.signal_strength,
+            "last_seen": last_seen.isoformat() if last_seen is not None else None,
+            "current_bluetooth_source": self.current_bluetooth_source,
+            "current_bluetooth_source_id": self.current_bluetooth_source_id,
+            "last_connection": self.last_connection_source,
+            "last_connection_source_id": self.last_connection_source_id,
             "closed": self.closed,
             "availability_timeout": self.availability_timeout,
             "default_transition": self.default_transition,

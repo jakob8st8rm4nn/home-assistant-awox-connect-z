@@ -34,7 +34,7 @@ review and device compatibility reports are welcome.
 - HomeControl import, fully local setup and Reconfigure for lamp/mesh management.
 - Live state correction from BLE advertisements and configurable availability.
 - On-demand BLE connections, idle disconnect, configurable command concurrency and same-lamp latest-wins command coalescing.
-- Bluetooth discovery of additional provisioned lamps and credential-redacted diagnostics.
+- Bluetooth discovery of additional provisioned lamps plus per-lamp diagnostic sensors and credential-redacted diagnostics.
 
 | Device | Cloud model | Firmware | Hardware | Tested functions |
 |---|---|---|---|---|
@@ -52,12 +52,9 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.7.0:** Update and restart Home Assistant. Existing entries and saved
-options are retained; no reconfiguration is required. Rapid same-lamp changes now
-coalesce while they are still waiting, instead of building a FIFO backlog. The
-default command concurrency remains **2**; explicitly saved values remain unchanged.
-For older installations reporting a missing or invalid mesh destination, use
-**Reconfigure** to refresh lamp data. See [CHANGELOG.md](CHANGELOG.md) for details.
+**Updating to 1.8.0:** Update and restart Home Assistant. Diagnostic sensors are
+added to each lamp automatically. Existing entries and saved options are retained;
+no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Setup and lamp management
 
@@ -99,6 +96,21 @@ Open the integration entry menu and choose **Reconfigure**:
 Home Assistant may also discover newly provisioned lamps through Bluetooth. Confirm
 the discovery to verify them against an existing mesh and add them. Factory-reset
 lamps or lamps with different mesh credentials cannot join through that flow.
+
+## Per-lamp diagnostics
+
+Each lamp exposes Home Assistant diagnostic entities for **Signal Strength**, **Last Seen**,
+**Bluetooth Status**, **Mesh ID**, **Current Bluetooth Source** and **Last Connection**.
+The current source identifies the adapter/proxy supplying Home Assistant's currently preferred
+advertisement. Last Connection records the scanner/proxy that actually established the most
+recent successful authenticated BLE/GATT session when Home Assistant exposes that path; the
+integration does not guess between multiple possible connection paths. Bluetooth Status
+distinguishes an active connection from a visible idle lamp and an unreachable lamp. Immediately
+after setup or reload it remains **Unknown** until a fresh advertisement or a successful BLE/GATT
+connection confirms Bluetooth liveness; the light entity's startup availability grace period is not
+reported as confirmed visibility. Diagnostic
+entities only publish changed values; small RSSI fluctuations are rate-limited to reduce needless
+state/recorder churn, while Last Seen is converted once per newer advertisement timestamp.
 
 ## Settings
 

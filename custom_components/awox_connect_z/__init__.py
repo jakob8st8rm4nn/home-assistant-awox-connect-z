@@ -40,7 +40,7 @@ from .const import (
 )
 from .protocol import protocol_self_test
 
-PLATFORMS = [Platform.LIGHT]
+PLATFORMS = [Platform.LIGHT, Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
 
 
