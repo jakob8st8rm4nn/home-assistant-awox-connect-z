@@ -133,6 +133,29 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         return not self._client.closed
 
     @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose mesh-ID comparison details without another sensor."""
+        if self.entity_description.key != "mesh_id":
+            return None
+
+        advertised = self._client.advertised_mesh_id
+        return {
+            "configured_mesh_id": f"0x{self._mesh_id:04X}",
+            "advertised_mesh_id": (
+                f"0x{advertised:04X}" if advertised is not None else None
+            ),
+            "mesh_id_status": self._client.mesh_id_status,
+        }
+
+    def _publish_signature(self) -> Any:
+        """Return state plus attributes that matter for HA publication."""
+        value = self.native_value
+        if self.entity_description.key != "mesh_id":
+            return value
+        attributes = self.extra_state_attributes or {}
+        return value, tuple(sorted(attributes.items()))
+
+    @property
     def native_value(self):
         """Return the current diagnostic value."""
         key = self.entity_description.key
@@ -166,7 +189,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         # Cache the value Home Assistant receives on initial add. Subsequent
         # diagnostic callbacks only write a state when this entity's own value
         # has actually changed.
-        self._last_published_value = self.native_value
+        self._last_published_value = self._publish_signature()
         self._last_published_at = time.monotonic()
 
         self.async_on_remove(
@@ -179,8 +202,9 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
     def _async_diagnostics_changed(self) -> None:
         """Publish only meaningful changes for this diagnostic entity."""
         value = self.native_value
+        signature = self._publish_signature()
         previous = self._last_published_value
-        if previous is not _UNSET and value == previous:
+        if previous is not _UNSET and signature == previous:
             return
 
         now = time.monotonic()
@@ -199,6 +223,6 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         ):
             return
 
-        self._last_published_value = value
+        self._last_published_value = signature
         self._last_published_at = now
         self.async_write_ha_state()

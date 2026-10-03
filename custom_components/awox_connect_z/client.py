@@ -71,6 +71,7 @@ class AwoxConnectZClient:
         max_concurrent_commands: int,
         runtime_connect_lock: asyncio.Lock | None = None,
         availability_timeout: float = DEFAULT_AVAILABILITY_TIMEOUT,
+        configured_mesh_id: int | None = None,
     ) -> None:
         self.hass = hass
         self.mac = mac
@@ -93,8 +94,30 @@ class AwoxConnectZClient:
         self._idle_task: asyncio.Task[None] | None = None
         self._closed = False
 
+        # ``last_error`` remains the current operational error and is cleared
+        # after a successful operation. The diagnostic error fields below keep
+        # the most recent historical failure so a recovered retry is still
+        # visible in downloaded diagnostics.
         self.last_error: str | None = None
         self.last_command: str | None = None
+        self.last_command_time: datetime | None = None
+        self.last_command_client_operation_duration_ms: int | None = None
+        self.last_command_attempts: int | None = None
+        self.last_command_retries: int | None = None
+        self.last_error_message: str | None = None
+        self.last_error_time: datetime | None = None
+        self.last_error_category: str | None = None
+        self.last_error_stage: str | None = None
+        self.last_error_command: str | None = None
+        self.last_error_write_attempt: int | None = None
+        self.last_connection_time: datetime | None = None
+
+        self.configured_mesh_id = (
+            int(configured_mesh_id) if configured_mesh_id is not None else None
+        )
+        self.advertised_mesh_id: int | None = None
+        self.advertised_mesh_id_time: datetime | None = None
+        self.mesh_id_status = "unknown"
 
         self._advertisement_state: AwoxAdvertisementState | None = None
         self._advertisement_listeners: set[
@@ -117,6 +140,109 @@ class AwoxConnectZClient:
         # immediately flap unavailable after a reload. Diagnostics must not
         # mistake that grace period for confirmed Bluetooth visibility.
         self._bluetooth_liveness_confirmed = False
+
+    @callback
+    def _record_error(
+        self,
+        error: Exception | str,
+        *,
+        category: str,
+        stage: str,
+        command_label: str | None = None,
+        write_attempt: int | None = None,
+    ) -> None:
+        """Record current and historical diagnostic error information."""
+        message = str(error)
+        self.last_error = message
+        self.last_error_message = message
+        self.last_error_time = dt_util.utcnow()
+        self.last_error_category = category
+        self.last_error_stage = stage
+        self.last_error_command = command_label
+        self.last_error_write_attempt = write_attempt
+        self._async_notify_diagnostic_listeners()
+
+    @callback
+    def _clear_current_error(self) -> None:
+        """Clear the current error without erasing historical diagnostics."""
+        self.last_error = None
+
+    @staticmethod
+    def _error_category(error: Exception, default: str) -> str:
+        """Return a compact diagnostic category for one exception."""
+        if isinstance(error, AwoxDeviceNotFound):
+            return "device_not_found"
+        if isinstance(error, AwoxAuthenticationError):
+            return "authentication"
+        if isinstance(error, TimeoutError) or "timed out" in str(error).lower():
+            return "timeout"
+        return default
+
+    @callback
+    def _record_command_success(
+        self,
+        label: str,
+        *,
+        started_monotonic: float,
+        attempts: int,
+    ) -> None:
+        """Store diagnostics for the last successfully written command."""
+        self.last_command = label
+        self.last_command_time = dt_util.utcnow()
+        self.last_command_client_operation_duration_ms = max(
+            0, round((time.monotonic() - started_monotonic) * 1000)
+        )
+        self.last_command_attempts = attempts
+        self.last_command_retries = max(0, attempts - 1)
+        self._clear_current_error()
+        self._async_notify_diagnostic_listeners()
+
+    @callback
+    def async_note_advertised_mesh_id(
+        self, mesh_id: int, *, seen_time: float | None = None
+    ) -> None:
+        """Compare one decoded advertisement mesh ID with configuration."""
+        mesh_id = int(mesh_id)
+        previous_id = self.advertised_mesh_id
+        previous_status = self.mesh_id_status
+        self.advertised_mesh_id = mesh_id
+
+        # Timestamp the complete status packet that actually carried the mesh ID.
+        # General Bluetooth Last Seen can also be refreshed by other advertisement
+        # forms and is therefore intentionally separate. HA's service-info time is
+        # monotonic, so convert it once to a stable UTC wall-clock value.
+        if seen_time is None:
+            self.advertised_mesh_id_time = dt_util.utcnow()
+        else:
+            age = max(0.0, time.monotonic() - float(seen_time))
+            self.advertised_mesh_id_time = dt_util.utcnow() - timedelta(seconds=age)
+
+        if self.configured_mesh_id is None:
+            status = "unknown"
+        elif mesh_id == self.configured_mesh_id:
+            status = "match"
+        else:
+            status = "mismatch"
+
+        self.mesh_id_status = status
+        if status == "mismatch" and previous_status != "mismatch":
+            _LOGGER.warning(
+                "AwoX Connect.Z mesh ID mismatch for %s: configured 0x%04X, "
+                "advertised 0x%04X; advertisement state is ignored",
+                self.mac,
+                self.configured_mesh_id,
+                mesh_id,
+            )
+        elif status == "match" and previous_status == "mismatch":
+            _LOGGER.info(
+                "AwoX Connect.Z mesh ID for %s matches configuration again "
+                "(0x%04X)",
+                self.mac,
+                mesh_id,
+            )
+
+        if previous_id != mesh_id or previous_status != status:
+            self._async_notify_diagnostic_listeners()
 
     @property
     def connected(self) -> bool:
@@ -320,15 +446,14 @@ class AwoxConnectZClient:
 
     @callback
     def _async_set_last_connection_source(self, source: str | None) -> None:
-        """Remember the actual scanner used by a successful GATT connection."""
-        changed = (
-            not self._last_connection_observed
-            or source != self._last_connection_source
-        )
+        """Remember source and time of a successful authenticated session."""
         self._last_connection_observed = True
         self._last_connection_source = source
-        if changed:
-            self._async_notify_diagnostic_listeners()
+        self.last_connection_time = dt_util.utcnow()
+        # Notify even when the source is unchanged: the downloadable diagnostic
+        # timestamp has still advanced. Visible sensor entities suppress writes
+        # when their own state did not change.
+        self._async_notify_diagnostic_listeners()
 
     @callback
     def async_add_availability_listener(
@@ -645,7 +770,7 @@ class AwoxConnectZClient:
                     )
                     self._client = client
                     await self._async_authenticate()
-                    self.last_error = None
+                    self._clear_current_error()
                     self._async_set_last_connection_source(
                         self._actual_connection_source(client)
                     )
@@ -753,7 +878,7 @@ class AwoxConnectZClient:
                     await self._async_disconnect(cancel_idle=False)
                     raise
 
-            self.last_error = None
+            self._clear_current_error()
             self._async_set_last_connection_source(
                 self._actual_connection_source(self._client)
             )
@@ -877,12 +1002,16 @@ class AwoxConnectZClient:
             async with self._command_lock:
                 try:
                     await self._async_ensure_connected()
-                    self.last_error = None
+                    self._clear_current_error()
                 except asyncio.CancelledError:
                     await self._async_disconnect(cancel_idle=True)
                     raise
                 except Exception as err:
-                    self.last_error = str(err)
+                    self._record_error(
+                        err,
+                        category=self._error_category(err, "verification"),
+                        stage="credential_verification",
+                    )
                     raise
                 finally:
                     await self._async_disconnect(cancel_idle=True)
@@ -899,6 +1028,7 @@ class AwoxConnectZClient:
         Once selected, that command remains fixed across the bounded write retry.
         """
         selected_label: str | None = None
+        command_started_monotonic = time.monotonic()
 
         def _select() -> tuple[bytes, str] | None:
             nonlocal selected_label
@@ -916,6 +1046,7 @@ class AwoxConnectZClient:
                         return await self._async_send_selected_locked(
                             _select,
                             runtime_command_timeout=command_timeout,
+                            command_started_monotonic=command_started_monotonic,
                         )
                 except asyncio.CancelledError:
                     # Keep the integration slot and per-lamp lock until cleanup
@@ -925,22 +1056,31 @@ class AwoxConnectZClient:
                 except TimeoutError as err:
                     await self._async_disconnect(cancel_idle=True)
                     if selected_label is None:
-                        self.last_error = (
+                        message = (
                             "AwoX command preparation exceeded the "
                             f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
                         )
+                        stage = "command_preparation"
                     else:
-                        self.last_error = (
+                        message = (
                             f"Command '{selected_label}' exceeded the "
                             f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
                         )
-                    raise AwoxConnectZError(self.last_error) from err
+                        stage = "command_runtime"
+                    self._record_error(
+                        message,
+                        category="timeout",
+                        stage=stage,
+                        command_label=selected_label,
+                    )
+                    raise AwoxConnectZError(message) from err
 
     async def _async_send_selected_locked(
         self,
         selector: Callable[[], tuple[bytes, str] | None],
         *,
         runtime_command_timeout: asyncio.Timeout,
+        command_started_monotonic: float,
     ) -> bool:
         """Run one late-selected command while runtime locks are already held."""
         try:
@@ -949,19 +1089,27 @@ class AwoxConnectZClient:
                 runtime_command_timeout=runtime_command_timeout,
             )
         except AwoxDeviceNotFound as err:
-            self.last_error = str(err)
+            self._record_error(
+                err, category="device_not_found", stage="device_lookup"
+            )
             raise AwoxConnectZError(
                 f"AwoX command preparation failed during device lookup: {err}"
             ) from err
         except AwoxAuthenticationError as err:
-            self.last_error = str(err)
+            self._record_error(
+                err, category="authentication", stage="authentication"
+            )
             raise AwoxConnectZError(
                 f"AwoX command preparation failed during authentication: {err}"
             ) from err
         except asyncio.CancelledError:
             raise
         except Exception as err:
-            self.last_error = str(err)
+            self._record_error(
+                err,
+                category=self._error_category(err, "connection"),
+                stage="connect",
+            )
             raise AwoxConnectZError(
                 f"AwoX command preparation failed during BLE connect: {err}"
             ) from err
@@ -971,7 +1119,7 @@ class AwoxConnectZClient:
         # await occurs between selection and construction of the first packet.
         selected = selector()
         if selected is None:
-            self.last_error = None
+            self._clear_current_error()
             self._schedule_idle_disconnect()
             return False
 
@@ -991,8 +1139,11 @@ class AwoxConnectZClient:
                         COMMAND_CHAR_UUID, packet, response=True
                     )
 
-                self.last_error = None
-                self.last_command = label
+                self._record_command_success(
+                    label,
+                    started_monotonic=command_started_monotonic,
+                    attempts=attempt,
+                )
                 self._async_note_connection_liveness()
                 self._schedule_idle_disconnect()
                 return True
@@ -1007,7 +1158,13 @@ class AwoxConnectZClient:
             except Exception as err:
                 last_exception = err
 
-            self.last_error = str(last_exception)
+            self._record_error(
+                last_exception,
+                category=self._error_category(last_exception, "write"),
+                stage="gatt_write",
+                command_label=label,
+                write_attempt=attempt,
+            )
             _LOGGER.debug(
                 "AwoX command write %s failed on attempt %s/%s: %s",
                 label,
@@ -1031,7 +1188,13 @@ class AwoxConnectZClient:
             except asyncio.CancelledError:
                 raise
             except Exception as reconnect_err:
-                self.last_error = str(reconnect_err)
+                self._record_error(
+                    reconnect_err,
+                    category=self._error_category(reconnect_err, "connection"),
+                    stage="retry_connect",
+                    command_label=label,
+                    write_attempt=attempt,
+                )
                 raise AwoxConnectZError(
                     f"Command '{label}' write failed; "
                     f"reconnect failed: {reconnect_err}"
@@ -1082,11 +1245,62 @@ class AwoxConnectZClient:
             "current_bluetooth_source_id": self.current_bluetooth_source_id,
             "last_connection": self.last_connection_source,
             "last_connection_source_id": self.last_connection_source_id,
+            "last_connection_time": (
+                self.last_connection_time.isoformat()
+                if self.last_connection_time is not None
+                else None
+            ),
             "closed": self.closed,
             "availability_timeout": self.availability_timeout,
             "default_transition": self.default_transition,
             "idle_disconnect": self.idle_disconnect,
             "max_concurrent_commands": self.max_concurrent_commands,
+            # Keep the existing flat values for compatibility and add grouped
+            # detail below for easier bug-report reading.
             "last_command": self.last_command,
             "last_error": self.last_error,
+            "command": {
+                "last_successful": self.last_command,
+                "time": (
+                    self.last_command_time.isoformat()
+                    if self.last_command_time is not None
+                    else None
+                ),
+                "client_operation_duration_ms": (
+                    self.last_command_client_operation_duration_ms
+                ),
+                "attempts": self.last_command_attempts,
+                "retries": self.last_command_retries,
+            },
+            "error": {
+                "last_message": self.last_error_message,
+                "time": (
+                    self.last_error_time.isoformat()
+                    if self.last_error_time is not None
+                    else None
+                ),
+                "category": self.last_error_category,
+                "stage": self.last_error_stage,
+                "command": self.last_error_command,
+                "write_attempt": self.last_error_write_attempt,
+                "current_message": self.last_error,
+            },
+            "mesh_id": {
+                "configured": (
+                    f"0x{self.configured_mesh_id:04X}"
+                    if self.configured_mesh_id is not None
+                    else None
+                ),
+                "advertised": (
+                    f"0x{self.advertised_mesh_id:04X}"
+                    if self.advertised_mesh_id is not None
+                    else None
+                ),
+                "advertised_time": (
+                    self.advertised_mesh_id_time.isoformat()
+                    if self.advertised_mesh_id_time is not None
+                    else None
+                ),
+                "status": self.mesh_id_status,
+            },
         }

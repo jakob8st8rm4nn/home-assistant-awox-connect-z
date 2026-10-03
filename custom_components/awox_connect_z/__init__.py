@@ -179,6 +179,7 @@ async def async_setup_entry(
             max_concurrent_commands=max_concurrent_commands,
             runtime_connect_lock=runtime_connect_lock,
             availability_timeout=availability_timeout,
+            configured_mesh_id=mesh_id,
         )
         clients.append((client, dict(device)))
 
@@ -200,15 +201,15 @@ async def async_setup_entry(
             if state is None:
                 return
 
+            # Record the mesh address carried by every complete decoded status
+            # packet, even when it does not match configuration. A mismatch is
+            # diagnostic only: it never rewrites the stored mesh destination.
+            _client.async_note_advertised_mesh_id(
+                state.mesh_id, seen_time=service_info.time
+            )
+
             # Only trust state from the configured lamp and mesh destination.
             if state.mesh_id != _expected_mesh_id:
-                _LOGGER.debug(
-                    "Ignoring AwoX advertisement for %s: mesh id 0x%04X "
-                    "does not match configured 0x%04X",
-                    _client.mac,
-                    state.mesh_id,
-                    _expected_mesh_id,
-                )
                 return
 
             _client.async_set_advertisement_state(state)

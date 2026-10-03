@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-10-03
+
+### Added
+
+- Extend diagnostic downloads with the last successful command's timestamp, client-operation duration and write attempts/retries, plus the last successful authenticated connection time.
+- Retain the latest historical error with timestamp, category, stage and affected command/write attempt when known, separately from the current operational error.
+- Compare configured and advertised mesh IDs. Expose the comparison on the existing Mesh ID sensor and in diagnostics, including the timestamp of the complete advertisement carrying the ID in the download.
+- Log mesh-ID mismatch transitions without repeatedly logging identical mismatches. Keep configured destinations unchanged and continue ignoring mismatched advertisement state.
+
 ## [1.8.0] - 2026-10-03
 
 ### Added

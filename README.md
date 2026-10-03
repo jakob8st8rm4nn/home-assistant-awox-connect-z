@@ -52,9 +52,8 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.8.0:** Update and restart Home Assistant. Diagnostic sensors are
-added to each lamp automatically. Existing entries and saved options are retained;
-no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md) for details.
+**Updating to 1.9.0:** Update and restart Home Assistant. Existing entries and saved
+options are retained; no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Setup and lamp management
 
@@ -104,11 +103,15 @@ lamps or lamps with different mesh credentials cannot join through that flow.
 | Signal Strength | Bluetooth signal strength (RSSI). |
 | Last Seen | Time of the last received Bluetooth advertisement. |
 | Bluetooth Status | Connected, visible or unreachable; initially unknown until Bluetooth liveness is confirmed. |
-| Mesh ID | The lamp's stored address within the mesh. |
+| Mesh ID | Stored mesh address; attributes show the advertised address and whether it matches. |
 | Current Bluetooth Source | Adapter/proxy supplying Home Assistant's currently preferred advertisement. |
 | Last Connection | Adapter/proxy used for the last successful connection, when identifiable. |
 
 Diagnostics use existing Bluetooth data without creating additional connections.
+The diagnostic download includes command timing and write attempts, historical errors
+with command context, connection timestamps and the last observed mesh-ID timestamp.
+Command duration covers the client operation, excluding earlier entity waiting.
+Mesh-ID mismatches are reported without changing the stored address.
 
 ## Settings
 
