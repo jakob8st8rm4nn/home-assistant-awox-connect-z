@@ -99,18 +99,16 @@ lamps or lamps with different mesh credentials cannot join through that flow.
 
 ## Per-lamp diagnostics
 
-Each lamp exposes Home Assistant diagnostic entities for **Signal Strength**, **Last Seen**,
-**Bluetooth Status**, **Mesh ID**, **Current Bluetooth Source** and **Last Connection**.
-The current source identifies the adapter/proxy supplying Home Assistant's currently preferred
-advertisement. Last Connection records the scanner/proxy that actually established the most
-recent successful authenticated BLE/GATT session when Home Assistant exposes that path; the
-integration does not guess between multiple possible connection paths. Bluetooth Status
-distinguishes an active connection from a visible idle lamp and an unreachable lamp. Immediately
-after setup or reload it remains **Unknown** until a fresh advertisement or a successful BLE/GATT
-connection confirms Bluetooth liveness; the light entity's startup availability grace period is not
-reported as confirmed visibility. Diagnostic
-entities only publish changed values; small RSSI fluctuations are rate-limited to reduce needless
-state/recorder churn, while Last Seen is converted once per newer advertisement timestamp.
+| Sensor | Meaning |
+|---|---|
+| Signal Strength | Bluetooth signal strength (RSSI). |
+| Last Seen | Time of the last received Bluetooth advertisement. |
+| Bluetooth Status | Connected, visible or unreachable; initially unknown until Bluetooth liveness is confirmed. |
+| Mesh ID | The lamp's stored address within the mesh. |
+| Current Bluetooth Source | Adapter/proxy supplying Home Assistant's currently preferred advertisement. |
+| Last Connection | Adapter/proxy used for the last successful connection, when identifiable. |
+
+Diagnostics use existing Bluetooth data without creating additional connections.
 
 ## Settings
 
@@ -123,42 +121,10 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 | Max Concurrent Commands | 2 | Allow 1–32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
 | Availability timeout | 30 s | Mark a lamp unavailable after 10–300 seconds without Bluetooth liveness or a working HA connection. |
 
-**Connection scheduling:** New runtime connections are established one at a time
-across all loaded AwoX entries, including entries using different proxies. Lamps
-already connected can still process commands in parallel when command capacity is
-available. Setup/Reconfigure and other integrations do not use this runtime gate.
-
-Waiting for the connection gate has a separate 30-second limit and does not consume
-the 30-second active command budget. Connect/authentication/write stages have
-12/4/4-second limits. Final disconnect cleanup can add up to its own 12-second
-budget. These are per-command processing limits, not a guaranteed duration for an
-entire user action or a queue of actions. A failed initial connection stops that
-command; write failures and recognizable GATT cache problems allow limited recovery.
-
-**Same-lamp command coalescing:** Rapid changes retain the newest waiting brightness
-and the newest color or color temperature. An off request discards older waiting
-changes. Targets remain replaceable during connection preparation and are selected
-immediately before writing. A command already being written finishes its bounded
-retry handling before the next target is selected; off cannot interrupt that command.
-
-**Rapid off/on compatibility:** After a successful off write, commands that can turn
-the lamp back on wait until **500 ms since that write have elapsed**. The remaining
-time is checked again immediately before selection. This addresses the observed
-behavior where a rapid brightness command after off updates the value but leaves
-the tested lamp physically off. An off discarded before writing starts no delay;
-ordinary commands have no artificial debounce. A new off arriving during an already
-started settling wait can also wait for the remainder of that pause.
-
-Cancelled calls discard their unsent targets while newer requests are preserved,
-including during disconnect cleanup. Fully superseded calls can complete without
-their own value being written. Successful writes update state optimistically;
-valid advertisements subsequently correct the reported lamp state.
-
-**Availability and state:** A working BLE connection or recent Bluetooth packets
-count as liveness. Receiving packets does not guarantee that a GATT connection will
-succeed. An intentional idle disconnect does not immediately mark a lamp unavailable.
-Commands update state optimistically; valid long advertisements later correct it.
-State updates can pause while Home Assistant or another app holds a BLE connection.
+- **Connections:** New control connections are established one at a time across AwoX entries. Already-connected lamps can be controlled in parallel, within the configured limit.
+- **Rapid changes:** The newest waiting brightness and color/color-temperature values are kept. Off discards older waiting changes; commands already being sent are allowed to finish.
+- **Off → on:** After a successful off write, commands that turn the lamp back on wait until 500 ms have elapsed. An off discarded before writing starts no delay.
+- **Lamp state:** Bluetooth advertisements correct the displayed state. These updates can pause while Home Assistant or the phone app holds a connection; idle disconnect alone does not make the lamp unavailable.
 
 ## Troubleshooting
 
