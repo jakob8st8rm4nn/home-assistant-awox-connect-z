@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .const import EFFECT_CANDLE, EFFECT_COLOR_CYCLE
+
 AWOX_COMPANY_ID = 0x0160
 # Connect.Z manufacturer-data prefix used by the supported device profile.
 # Bytes 2-5 contain the lower four MAC bytes in reverse order.
@@ -25,6 +27,8 @@ class AwoxAdvertisementState:
     hue_raw: int | None
     saturation_percent: float | None
     saturation_raw: int | None
+    effect: str | None
+    effect_state_known: bool
     mode_raw: int
 
 
@@ -64,7 +68,14 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
         [2:5]   lower MAC bytes, little-endian
         [6:7]   Connect.Z marker 03 00
         [9:10]  16-bit mesh id, little-endian
-        [11]    mode bitfield: bit0=power, bit1=color mode
+        [11]    hardware-confirmed mode values:
+                00=off/white, 01=on/white,
+                02=off/color, 03=on/static color,
+                06=off/color cycle preset, 07=on/color cycle,
+                10=off/candle preset on white/CCT,
+                11=on/candle on white/CCT,
+                12=off/candle preset on color,
+                13=on/candle on color
         [12]    brightness, 0x00..0xFE
         [13:14] white color temperature in mireds, little-endian
         [15]    hue
@@ -81,6 +92,26 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
     mode = data[11]
     is_on = bool(mode & 0x01)
     is_color_mode = bool(mode & 0x02)
+    # Hardware-confirmed complete mode values on EGLO-ZM-RGB-TW firmware
+    # 3.0.2.  Decode effects only from the confirmed combinations instead of
+    # treating arbitrary bit combinations as authoritative.  This matters
+    # because the effect state also controls which stop command is selected.
+    if mode in (0x06, 0x07):
+        # 0x06 is the same native color-cycle state while power is off.
+        # The lamp remembers the effect and starts it on the next power-on.
+        effect = EFFECT_COLOR_CYCLE
+        effect_state_known = True
+    elif mode in (0x10, 0x11, 0x12, 0x13):
+        # Candle preserves the underlying white/CCT or HS appearance. 0x10/0x12
+        # are the corresponding remembered-effect states while power is off.
+        effect = EFFECT_CANDLE
+        effect_state_known = True
+    elif mode in (0x00, 0x01, 0x02, 0x03):
+        effect = None
+        effect_state_known = True
+    else:
+        effect = None
+        effect_state_known = False
 
     brightness_raw = data[12]
     # Connect.Z uses 0xFE as the confirmed full-scale brightness value.
@@ -120,6 +151,8 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
         hue_raw=hue_raw,
         saturation_percent=saturation_percent,
         saturation_raw=saturation_raw,
+        effect=effect,
+        effect_state_known=effect_state_known,
         mode_raw=mode,
     )
 
@@ -139,6 +172,8 @@ def advertisement_self_test() -> None:
         raise RuntimeError("AwoX advertisement self-test decoded red values incorrectly")
     if round(state.saturation_percent or 0) != 100:
         raise RuntimeError("AwoX advertisement self-test decoded saturation incorrectly")
+    if state.effect is not None or not state.effect_state_known:
+        raise RuntimeError("AwoX advertisement self-test invented an effect")
 
     # Known white-mode frame.
     white = bytes.fromhex(
@@ -151,6 +186,102 @@ def advertisement_self_test() -> None:
         raise RuntimeError("AwoX advertisement self-test decoded white values incorrectly")
     if state.color_temp_mired != 196 or state.color_temp_kelvin != 5102:
         raise RuntimeError("AwoX advertisement self-test decoded color temperature incorrectly")
+    if state.effect is not None or not state.effect_state_known:
+        raise RuntimeError("AwoX advertisement self-test invented a white-mode effect")
+
+    # Hardware-confirmed native effect modes on the same lamp family.
+    color_cycle = bytes.fromhex(
+        "96 20 19 75 41 38 03 00 02 61 D3 07 FE FF FF 18 AE 04 3E 60"
+    )
+    state = parse_awox_advertisement(color_cycle)
+    if (
+        state is None
+        or state.effect != EFFECT_COLOR_CYCLE
+        or not state.effect_state_known
+        or not state.is_on
+    ):
+        raise RuntimeError("AwoX advertisement self-test missed color-cycle mode")
+
+    candle = bytes.fromhex(
+        "96 20 19 75 41 38 03 00 02 61 D3 13 FE FF FF 65 AE 04 3E 60"
+    )
+    state = parse_awox_advertisement(candle)
+    if (
+        state is None
+        or state.effect != EFFECT_CANDLE
+        or not state.effect_state_known
+        or not state.is_on
+    ):
+        raise RuntimeError("AwoX advertisement self-test missed candle mode")
+
+    # Hardware-confirmed remembered-effect modes while the lamp is powered off.
+    # A subsequent ordinary power-on starts the remembered effect; an explicit
+    # power-off command clears it on the tested hardware.
+    color_cycle_off = bytearray(color_cycle)
+    color_cycle_off[11] = 0x06
+    state = parse_awox_advertisement(bytes(color_cycle_off))
+    if (
+        state is None
+        or state.effect != EFFECT_COLOR_CYCLE
+        or not state.effect_state_known
+        or state.is_on
+    ):
+        raise RuntimeError(
+            "AwoX advertisement self-test missed off color-cycle preset mode"
+        )
+
+    candle_off = bytearray(candle)
+    candle_off[11] = 0x12
+    state = parse_awox_advertisement(bytes(candle_off))
+    if (
+        state is None
+        or state.effect != EFFECT_CANDLE
+        or not state.effect_state_known
+        or state.is_on
+    ):
+        raise RuntimeError(
+            "AwoX advertisement self-test missed off candle preset mode"
+        )
+
+    candle_white = bytes.fromhex(
+        "96 20 19 75 41 38 03 00 02 61 D3 11 FE 99 00 FF FF 04 3E 60"
+    )
+    state = parse_awox_advertisement(candle_white)
+    if (
+        state is None
+        or state.effect != EFFECT_CANDLE
+        or not state.effect_state_known
+        or not state.is_on
+        or state.is_color_mode
+        or state.color_temp_mired != 0x0099
+    ):
+        raise RuntimeError(
+            "AwoX advertisement self-test missed white/CCT candle mode"
+        )
+
+    candle_white_off = bytes.fromhex(
+        "96 20 19 75 41 38 03 00 02 61 D3 10 FE FA 00 FF FF 04 3E 60"
+    )
+    state = parse_awox_advertisement(candle_white_off)
+    if (
+        state is None
+        or state.effect != EFFECT_CANDLE
+        or not state.effect_state_known
+        or state.is_on
+        or state.is_color_mode
+        or state.color_temp_mired != 0x00FA
+    ):
+        raise RuntimeError(
+            "AwoX advertisement self-test missed off white/CCT candle preset mode"
+        )
+
+    contradictory = bytearray(color_cycle)
+    contradictory[11] = 0x17
+    state = parse_awox_advertisement(bytes(contradictory))
+    if state is None or state.effect is not None or state.effect_state_known:
+        raise RuntimeError(
+            "AwoX advertisement self-test trusted an unconfirmed effect mode"
+        )
 
     if parse_awox_advertisement(bytes.fromhex("96 20 19 75 41 38")) is not None:
         raise RuntimeError("AwoX advertisement self-test accepted short base advert")

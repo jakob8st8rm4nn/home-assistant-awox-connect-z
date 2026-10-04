@@ -10,25 +10,38 @@ from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_MODE,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_EFFECT,
     ATTR_HS_COLOR,
     ATTR_TRANSITION,
     ColorMode,
+    EFFECT_OFF,
     LightEntity,
     LightEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_ON
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .advertisement import AwoxAdvertisementState
 from .client import AwoxConnectZClient
-from .const import DOMAIN, MAX_COLOR_TEMP_KELVIN, MIN_COLOR_TEMP_KELVIN
+from .const import (
+    DOMAIN,
+    EFFECT_CANDLE,
+    EFFECT_COLOR_CYCLE,
+    MAX_COLOR_TEMP_KELVIN,
+    MIN_COLOR_TEMP_KELVIN,
+    NATIVE_EFFECTS,
+)
 from .protocol import (
     ha_brightness_to_device,
     make_brightness,
+    make_candle_effect,
+    make_color_cycle_start,
+    make_color_cycle_stop,
     make_color_temp_kelvin,
     make_hs_color,
     make_power,
@@ -53,10 +66,10 @@ class _PendingBrightness:
 
 @dataclass(slots=True)
 class _PendingAppearance:
-    """Newest waiting color or color-temperature request."""
+    """Newest waiting static appearance, native effect or effect-off request."""
 
-    color_mode: ColorMode
-    value: tuple[float, float] | int
+    kind: str
+    value: tuple[float, float] | int | str | None
     transition: float
     sequence: int
 
@@ -97,7 +110,10 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
     _attr_has_entity_name = True
     _attr_name = None
     _attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
-    _attr_supported_features = LightEntityFeature.TRANSITION
+    _attr_supported_features = (
+        LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
+    )
+    _attr_effect_list = [EFFECT_OFF, *NATIVE_EFFECTS]
     _attr_min_color_temp_kelvin = MIN_COLOR_TEMP_KELVIN
     _attr_max_color_temp_kelvin = MAX_COLOR_TEMP_KELVIN
     _attr_should_poll = False
@@ -127,6 +143,13 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         self._attr_color_mode = ColorMode.COLOR_TEMP
         self._attr_color_temp_kelvin = 4000
         self._attr_hs_color = (0.0, 100.0)
+        # Home Assistant has no public "unknown effect" value.  Keep the
+        # displayed value at EFFECT_OFF until hardware/our own successful write
+        # establishes the truth, while tracking certainty separately for command
+        # selection.
+        self._attr_effect = EFFECT_OFF
+        self._effect_state_known = False
+        self._possible_native_effects = set(NATIVE_EFFECTS)
         model = str(device.get("model") or "Connect.Z RGB/TW")
         manufacturer = str(device.get("manufacturer") or "AwoX / EGLO")
         self._attr_device_info = DeviceInfo(
@@ -154,6 +177,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             "cloud_mesh_id": self._device.get("mesh_id"),
             "mesh_destination": f"0x{self._mesh_id:04X}",
             "cloud_device_type": self._device.get("device_type"),
+            "effect_state_known": self._effect_state_known,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -208,6 +232,18 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         self._attr_is_on = state.is_on
         self._attr_brightness = state.brightness
 
+        if state.effect_state_known:
+            self._set_effect_state_known(state.effect)
+        else:
+            # Unknown/contradictory mode combinations must not choose a stop
+            # command or suppress a later effect start as if they were certain.
+            self._set_effect_state_unknown()
+
+        # Effect advertisements still carry the lamp's underlying static
+        # appearance. This is especially important for Candle: hardware confirms
+        # 0x10/0x11 on white/CCT and 0x12/0x13 on HS color. Keep the effect state
+        # separate, but update the base color mode and values from the same
+        # authoritative advertisement instead of leaving stale HA color data.
         if state.is_color_mode:
             if (
                 state.hue_degrees is not None
@@ -490,6 +526,111 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         if remaining > 0:
             await asyncio.sleep(remaining)
 
+    def _set_effect_state_known(self, effect: str | None) -> None:
+        """Record an authoritative/optimistically confirmed effect state."""
+        self._effect_state_known = True
+        if effect in NATIVE_EFFECTS:
+            effect_name = str(effect)
+            self._attr_effect = effect_name
+            self._possible_native_effects = {effect_name}
+        else:
+            self._attr_effect = EFFECT_OFF
+            self._possible_native_effects.clear()
+
+    def _set_effect_state_unknown(
+        self, possible_effects: set[str] | None = None
+    ) -> None:
+        """Mark effect state uncertain without pretending it is EFFECT_OFF."""
+        possible = (
+            set(NATIVE_EFFECTS)
+            if possible_effects is None
+            else {effect for effect in possible_effects if effect in NATIVE_EFFECTS}
+        )
+        if not possible:
+            self._set_effect_state_known(None)
+            return
+        self._effect_state_known = False
+        self._possible_native_effects = possible
+
+    def _current_possible_effects(self) -> set[str]:
+        """Return effects that may physically be active right now."""
+        if not self._effect_state_known:
+            return set(self._possible_native_effects)
+        effect = self._attr_effect
+        if effect in NATIVE_EFFECTS:
+            return {str(effect)}
+        return set()
+
+    def _active_native_effect(self) -> str | None:
+        """Return a native effect only when its identity is actually known."""
+        if not self._effect_state_known:
+            return None
+        effect = self._attr_effect
+        if effect in NATIVE_EFFECTS:
+            return str(effect)
+        return None
+
+    def _appearance_effect_to_stop(
+        self, appearance: _PendingAppearance
+    ) -> str | None:
+        """Return one effect that must be stopped before this target.
+
+        When the current effect is unknown, the two independently confirmed
+        stop commands are used as a bounded cleanup.  If the requested target
+        is itself an effect, that same effect does not need to be stopped first:
+        after conflicting effects are removed its start command is sent
+        unconditionally, which establishes the final state.
+        """
+        if self._effect_state_known:
+            active_effect = self._active_native_effect()
+            if active_effect is None:
+                return None
+            if appearance.kind == "effect" and appearance.value == active_effect:
+                return None
+            return active_effect
+
+        candidates = set(self._possible_native_effects)
+        if appearance.kind == "effect":
+            candidates.discard(str(appearance.value))
+
+        for effect in NATIVE_EFFECTS:
+            if effect in candidates:
+                return effect
+        return None
+
+    def _mark_effect_uncertain_after_failed_write(
+        self, command: _InFlightCommand | None
+    ) -> None:
+        """Preserve ambiguity when a selected effect-changing write fails.
+
+        Once selection happened, the client is at the GATT write boundary.  A
+        final timeout/error therefore cannot prove whether the lamp processed
+        the packet.  Connection failures before selection leave this state alone.
+        """
+        if command is None:
+            return
+        if command.kind not in {
+            "effect_start",
+            "effect_start_before_power_on",
+            "effect_stop",
+            "power_off",
+        }:
+            return
+        # Do not let an advertisement received after command selection suppress
+        # this uncertainty. The client may retry the same selected command after
+        # that advertisement; if the final retry reaches the lamp but its
+        # acknowledgement is lost, the advertisement can describe the state
+        # *before* the last write. A later advertisement received after this
+        # failure may confirm the real state again.
+        possible = self._current_possible_effects()
+        if (
+            command.kind in {"effect_start", "effect_start_before_power_on"}
+            and command.value in NATIVE_EFFECTS
+        ):
+            possible.add(str(command.value))
+
+        self._set_effect_state_unknown(possible)
+
     async def _async_command_worker(self, generation: int) -> None:
         """Execute one BLE command at a time, selecting only when ready to write."""
         try:
@@ -528,6 +669,21 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                         if self._inflight_sequences
                         else self._pending_sequences()
                     )
+                    effect_state_may_have_changed = (
+                        self._inflight_command is not None
+                        and self._inflight_command.kind
+                        in {
+                            "effect_start",
+                            "effect_start_before_power_on",
+                            "effect_stop",
+                            "power_off",
+                        }
+                    )
+                    self._mark_effect_uncertain_after_failed_write(
+                        self._inflight_command
+                    )
+                    if effect_state_may_have_changed:
+                        self.async_write_ha_state()
                     self._inflight_sequences.clear()
                     self._inflight_command = None
                     self._drop_pending_sequences(failed_sequences)
@@ -614,8 +770,69 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 "power:off",
             )
 
+        # A native effect has its own stop command. Treat that stop as a
+        # prerequisite of the newest appearance target and re-evaluate the
+        # target afterwards. This preserves the existing late-selection and
+        # latest-wins semantics when a newer color/effect arrives mid-switch.
+        appearance = self._pending_appearance
+        if appearance is not None:
+            effect_to_stop = self._appearance_effect_to_stop(appearance)
+            if effect_to_stop is not None:
+                command = _InFlightCommand(
+                    kind="effect_stop",
+                    sequences={appearance.sequence},
+                    value=effect_to_stop,
+                )
+                self._inflight_sequences = set(command.sequences)
+                self._inflight_command = command
+
+                if effect_to_stop == EFFECT_COLOR_CYCLE:
+                    return (
+                        make_color_cycle_stop(mesh_id=self._mesh_id),
+                        "effect:color_cycle:stop",
+                    )
+
+                return (
+                    make_candle_effect(False, mesh_id=self._mesh_id),
+                    "effect:candle:stop",
+                )
+
+        # Native effects are special when the lamp is currently off. Hardware
+        # testing showed that priming the native effect first and only then
+        # turning the lamp on avoids a firmware state where a later power-off
+        # can be reported as off while the LEDs remain lit. Keep the appearance
+        # pending so the next late-selection pass performs the turn-on step and
+        # only then completes the request.
+        appearance = self._pending_appearance
+        if (
+            appearance is not None
+            and appearance.kind == "effect"
+            and not self._attr_is_on
+        ):
+            effect = str(appearance.value)
+            if not (self._effect_state_known and self._attr_effect == effect):
+                command = _InFlightCommand(
+                    kind="effect_start_before_power_on",
+                    sequences={appearance.sequence},
+                    value=effect,
+                )
+                self._inflight_sequences = set(command.sequences)
+                self._inflight_command = command
+
+                if effect == EFFECT_COLOR_CYCLE:
+                    return (
+                        make_color_cycle_start(mesh_id=self._mesh_id),
+                        "effect:color_cycle:start-before-power-on",
+                    )
+
+                return (
+                    make_candle_effect(True, mesh_id=self._mesh_id),
+                    "effect:candle:start-before-power-on",
+                )
+
         # Brightness is its own turn-on path. A waiting plain "on" can be
-        # satisfied by this same brightness write.
+        # satisfied by this same brightness write. If a native effect was also
+        # requested while off, the effect-start prerequisite above runs first.
         brightness = self._pending_brightness
         if brightness is not None:
             self._pending_brightness = None
@@ -644,9 +861,11 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
         appearance = self._pending_appearance
         if appearance is not None and not self._attr_is_on:
-            # The appearance request owns this prerequisite. Do not consume the
-            # appearance itself; after power-on succeeds the pending target is
-            # re-evaluated before any color/CT write starts.
+            # The appearance request owns this prerequisite. Native effects reach
+            # this point only after their start command has been sent (or when the
+            # same effect is already confirmed as remembered while off). Do not
+            # consume the appearance itself; after power-on succeeds the pending
+            # target is re-evaluated before completion/static appearance writes.
             command = _InFlightCommand(
                 kind="power_on_for_appearance",
                 sequences={appearance.sequence},
@@ -679,7 +898,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         if appearance is not None:
             self._pending_appearance = None
 
-            if appearance.color_mode is ColorMode.HS:
+            if appearance.kind == "hs":
                 hue, saturation = appearance.value
                 value = (float(hue), float(saturation))
                 command = _InFlightCommand(
@@ -699,21 +918,59 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                     f"hs:{value[0]:.1f},{value[1]:.1f}",
                 )
 
-            kelvin = int(appearance.value)
-            command = _InFlightCommand(
-                kind="color_temp",
-                sequences={appearance.sequence},
-                value=kelvin,
-            )
-            self._inflight_sequences = set(command.sequences)
-            self._inflight_command = command
-            return (
-                make_color_temp_kelvin(
-                    kelvin,
-                    appearance.transition,
-                    mesh_id=self._mesh_id,
-                ),
-                f"color_temp:{kelvin}K",
+            if appearance.kind == "color_temp":
+                kelvin = int(appearance.value)
+                command = _InFlightCommand(
+                    kind="color_temp",
+                    sequences={appearance.sequence},
+                    value=kelvin,
+                )
+                self._inflight_sequences = set(command.sequences)
+                self._inflight_command = command
+                return (
+                    make_color_temp_kelvin(
+                        kelvin,
+                        appearance.transition,
+                        mesh_id=self._mesh_id,
+                    ),
+                    f"color_temp:{kelvin}K",
+                )
+
+            if appearance.kind == "effect":
+                effect = str(appearance.value)
+
+                # Skip an identical start only when the effect identity is
+                # actually known.  An uncertain state must be re-established.
+                if self._effect_state_known and self._attr_effect == effect:
+                    return None
+
+                command = _InFlightCommand(
+                    kind="effect_start",
+                    sequences={appearance.sequence},
+                    value=effect,
+                )
+                self._inflight_sequences = set(command.sequences)
+                self._inflight_command = command
+
+                if effect == EFFECT_COLOR_CYCLE:
+                    return (
+                        make_color_cycle_start(mesh_id=self._mesh_id),
+                        "effect:color_cycle:start",
+                    )
+
+                return (
+                    make_candle_effect(True, mesh_id=self._mesh_id),
+                    "effect:candle:start",
+                )
+
+            if appearance.kind == "effect_off":
+                # Any active native effect was already stopped by the
+                # prerequisite branch above. Consuming this target without a
+                # second write is therefore correct.
+                return None
+
+            raise RuntimeError(
+                f"Unsupported AwoX appearance target {appearance.kind!r}"
             )
 
         return None
@@ -727,6 +984,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
         if command.kind == "power_off":
             self._attr_is_on = False
+            self._set_effect_state_known(None)
             self._power_off_settle_until = (
                 asyncio.get_running_loop().time() + POWER_OFF_SETTLE_SECONDS
             )
@@ -739,10 +997,32 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             hue, saturation = command.value
             self._attr_hs_color = (float(hue), float(saturation))
             self._attr_color_mode = ColorMode.HS
+            self._set_effect_state_known(None)
             self._attr_is_on = True
         elif command.kind == "color_temp":
             self._attr_color_temp_kelvin = int(command.value)
             self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._set_effect_state_known(None)
+            self._attr_is_on = True
+        elif command.kind == "effect_stop":
+            stopped_effect = str(command.value)
+            if self._effect_state_known:
+                if self._attr_effect == stopped_effect:
+                    self._set_effect_state_known(None)
+            else:
+                possible = set(self._possible_native_effects)
+                possible.discard(stopped_effect)
+                self._set_effect_state_unknown(possible)
+        elif command.kind == "effect_start_before_power_on":
+            self._set_effect_state_known(str(command.value))
+            # A native effect command sent while off is remembered by the lamp
+            # but does not physically turn it on. Keep is_on false so the same
+            # pending appearance proceeds to its explicit power-on prerequisite.
+        elif command.kind == "effect_start":
+            self._set_effect_state_known(str(command.value))
+            # Candle in particular can run over the previous white or HS
+            # appearance. Do not fabricate an HS base mode here; advertisements
+            # or later static commands remain authoritative for color_mode.
             self._attr_is_on = True
 
         self.async_write_ha_state()
@@ -755,10 +1035,31 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         brightness = kwargs.get(ATTR_BRIGHTNESS)
         hs_color = kwargs.get(ATTR_HS_COLOR)
         color_temp_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
+        effect_requested = ATTR_EFFECT in kwargs
+        effect = str(kwargs[ATTR_EFFECT]) if effect_requested else None
+
+        if effect_requested and effect not in self._attr_effect_list:
+            raise HomeAssistantError(
+                f"Unsupported AwoX Connect.Z effect: {effect}"
+            )
+
+        if (
+            effect_requested
+            and effect != EFFECT_OFF
+            and (hs_color is not None or color_temp_kelvin is not None)
+        ):
+            raise HomeAssistantError(
+                "AwoX Connect.Z cannot set a static color/color temperature "
+                "and start a native effect in the same command"
+            )
 
         sequence, waiter = self._new_request()
 
-        has_appearance = hs_color is not None or color_temp_kelvin is not None
+        has_appearance = (
+            hs_color is not None
+            or color_temp_kelvin is not None
+            or effect_requested
+        )
 
         # Any later on/brightness/appearance request supersedes a still-waiting off.
         # Only a plain "on" needs its own pending power slot. Brightness is already
@@ -782,7 +1083,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         if hs_color is not None:
             hue, saturation = hs_color
             self._pending_appearance = _PendingAppearance(
-                color_mode=ColorMode.HS,
+                kind="hs",
                 value=(float(hue), float(saturation)),
                 transition=transition,
                 sequence=sequence,
@@ -793,8 +1094,15 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 min(MAX_COLOR_TEMP_KELVIN, int(color_temp_kelvin)),
             )
             self._pending_appearance = _PendingAppearance(
-                color_mode=ColorMode.COLOR_TEMP,
+                kind="color_temp",
                 value=kelvin,
+                transition=transition,
+                sequence=sequence,
+            )
+        elif effect_requested:
+            self._pending_appearance = _PendingAppearance(
+                kind="effect_off" if effect == EFFECT_OFF else "effect",
+                value=None if effect == EFFECT_OFF else effect,
                 transition=transition,
                 sequence=sequence,
             )

@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.0] - 2026-10-04
+
+### Added
+
+- Add the lamp-native **Color cycle** and **Candle** effects to the Home Assistant light entity. The effects run inside the lamp and do not require a Home Assistant animation loop.
+- Add the hardware-confirmed per-lamp start/stop commands for both effects, using the configured 16-bit mesh destination rather than mesh broadcast.
+- Decode the hardware-confirmed advertisement modes for Color cycle (`0x06` off/preset, `0x07` on) and Candle over white/CCT (`0x10` off/preset, `0x11` on) or color (`0x12` off/preset, `0x13` on) so effect state is corrected from live Bluetooth advertisements.
+
+### Reliability
+
+- Integrate effects into the existing per-lamp latest-wins appearance target. Static color, color temperature and effects replace one another while brightness remains independent.
+- Stop the currently active native effect with its matching command before switching to the other effect or to a static color/color temperature. Re-evaluate the newest target after the stop instead of prebuilding a fixed stop/start sequence.
+- When an effect is requested while the lamp is off, send the native effect start first and then power on. This hardware-tested order avoids a firmware state in which a later off can be advertised while the LEDs remain lit. Power-off itself remains a direct power command and does not add a separate effect-stop prerequisite; a successful power-off clears the optimistic effect state and retains the existing 500 ms post-off settling guard before later turn-on-style commands.
+- Reject ambiguous requests that try to start a native effect and set a static color/color temperature in the same Home Assistant command. `effect: off` can be combined with a static target and uses the static target's normal effect-cleanup path.
+- Keep an unknown effect state distinct from confirmed `off`. If no authoritative effect state is available, clean up only the relevant native effect possibilities with the confirmed stop commands before reporting a static/off target as complete.
+- Mark the effect state uncertain after an effect-changing GATT write ends ambiguously, even if an advertisement arrived between retry attempts; a later advertisement may confirm the final physical state again. Identical effect starts are skipped only when the current effect is known.
+- Preserve the underlying static color mode when Candle starts instead of forcing Home Assistant to HS, and trust effect advertisements only for the hardware-confirmed complete mode values. Keep a remembered effect visible while the lamp is off; a later ordinary power-on can resume it, while a successfully written power-off clears it.
+- Update the underlying HS or white/CCT values from Candle advertisements as well, so externally changed Candle color/temperature and post-reload state do not leave stale Home Assistant color data.
+
 ## [1.9.0] - 2026-10-03
 
 ### Added

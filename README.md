@@ -30,7 +30,7 @@ review and device compatibility reports are welcome.
 
 ## Features and tested hardware
 
-- Power, brightness, hue/saturation color, tunable white and transitions.
+- Power, brightness, hue/saturation color, tunable white, transitions and the native **Color cycle** / **Candle** effects.
 - HomeControl import, fully local setup and Reconfigure for lamp/mesh management.
 - Live state correction from BLE advertisements and configurable availability.
 - On-demand BLE connections, idle disconnect, configurable command concurrency and same-lamp latest-wins command coalescing.
@@ -38,7 +38,7 @@ review and device compatibility reports are welcome.
 
 | Device | Cloud model | Firmware | Hardware | Tested functions |
 |---|---|---|---|---|
-| EGLO `900024/12253` | `EGLO-ZM-RGB-TW` | `3.0.2` | `4.62` | Power, brightness, HS color, color temperature |
+| EGLO `900024/12253` | `EGLO-ZM-RGB-TW` | `3.0.2` | `4.62` | Power, brightness, HS color, color temperature, Color cycle, Candle |
 
 ## Installation
 
@@ -52,7 +52,7 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.9.0:** Update and restart Home Assistant. Existing entries and saved
+**Updating to 1.10.0:** Update and restart Home Assistant. Existing entries and saved
 options are retained; no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Setup and lamp management
@@ -125,9 +125,10 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 | Availability timeout | 30 s | Mark a lamp unavailable after 10–300 seconds without Bluetooth liveness or a working HA connection. |
 
 - **Connections:** New control connections are established one at a time across AwoX entries. Already-connected lamps can be controlled in parallel, within the configured limit.
-- **Rapid changes:** The newest waiting brightness and color/color-temperature values are kept. Off discards older waiting changes; commands already being sent are allowed to finish.
+- **Rapid changes:** The newest waiting brightness and appearance target are kept. Static color, color temperature and native effects share one latest-wins appearance slot; brightness stays independent. Off discards older waiting changes; commands already being sent are allowed to finish.
 - **Off → on:** After a successful off write, commands that turn the lamp back on wait until 500 ms have elapsed. An off discarded before writing starts no delay.
-- **Lamp state:** Bluetooth advertisements correct the displayed state. These updates can pause while Home Assistant or the phone app holds a connection; idle disconnect alone does not make the lamp unavailable.
+- **Native effects:** Color cycle and Candle run in the lamp. Effects are prepared before switching an off lamp on; switching effects uses the matching stop command. Unknown effect state is tracked internally until confirmed. See the [protocol reference](docs/protocol.md) for mode tables and command details.
+- **Lamp state:** Bluetooth advertisements correct power, brightness, color mode and native effect state. These updates can pause while Home Assistant or the phone app holds a connection; idle disconnect alone does not make the lamp unavailable.
 
 ## Troubleshooting
 

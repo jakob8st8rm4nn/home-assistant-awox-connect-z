@@ -41,6 +41,13 @@ DATA_RUNTIME_CONNECT_LOCK = "_runtime_connect_lock"
 MIN_COLOR_TEMP_KELVIN = 2200
 MAX_COLOR_TEMP_KELVIN = 6500
 
+# Native lamp-side effects confirmed on EGLO-ZM-RGB-TW firmware 3.0.2.
+# Keep the names stable because Home Assistant stores/forwards effect values as
+# strings and exposes them directly through the light entity.
+EFFECT_COLOR_CYCLE = "Color cycle"
+EFFECT_CANDLE = "Candle"
+NATIVE_EFFECTS = (EFFECT_COLOR_CYCLE, EFFECT_CANDLE)
+
 PAIR_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1914"
 COMMAND_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1912"
 STATUS_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1911"

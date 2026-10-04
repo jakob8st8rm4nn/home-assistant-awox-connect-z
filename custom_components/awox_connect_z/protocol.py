@@ -168,6 +168,37 @@ def make_color_temp_kelvin(
     return finalize_block(block)
 
 
+def make_color_cycle_start(*, mesh_id: int) -> bytes:
+    """Start the native lamp-side color cycle on one device."""
+    block = bytearray.fromhex(
+        "00 09 00 00 01 00 03 41 01 00 0c 00 00 00 00 00"
+    )
+    _put_destination(block, mesh_id)
+    return finalize_block(block)
+
+
+def make_color_cycle_stop(*, mesh_id: int) -> bytes:
+    """Stop the native color cycle with the tested StopMoveStep variant."""
+    # The tested per-lamp command uses length 0x06 and no payload. The AwoX app
+    # capture also contained a longer 0x09 variant with three zero payload bytes;
+    # keep the hardware-tested Python variant here deliberately.
+    block = bytearray.fromhex(
+        "00 06 00 00 01 00 03 47 00 00 00 00 00 00 00 00"
+    )
+    _put_destination(block, mesh_id)
+    return finalize_block(block)
+
+
+def make_candle_effect(enabled: bool, *, mesh_id: int) -> bytes:
+    """Start or stop the native lamp-side candle effect on one device."""
+    block = bytearray.fromhex(
+        "00 08 00 00 01 08 00 10 00 01 00 00 00 00 00 00"
+    )
+    _put_destination(block, mesh_id)
+    block[8] = 1 if enabled else 0
+    return finalize_block(block)
+
+
 def ha_brightness_to_device(brightness: int) -> int:
     """Map Home Assistant 1..255 to the device's 1..254."""
     return max(1, min(254, round(int(brightness) * 254 / 255)))
@@ -209,6 +240,22 @@ def protocol_self_test() -> None:
                 mesh_id=0xD361,
             ),
             bytes.fromhex("08 0a d3 61 01 00 03 0a fc 00 02 00 00 00 00 00"),
+        ),
+        (
+            make_color_cycle_start(mesh_id=0xD361),
+            bytes.fromhex("18 09 d3 61 01 00 03 41 01 00 0c 00 00 00 00 00"),
+        ),
+        (
+            make_color_cycle_stop(mesh_id=0xD361),
+            bytes.fromhex("24 06 d3 61 01 00 03 47 00 00 00 00 00 00 00 00"),
+        ),
+        (
+            make_candle_effect(True, mesh_id=0xD361),
+            bytes.fromhex("30 08 d3 61 01 08 00 10 01 01 00 00 00 00 00 00"),
+        ),
+        (
+            make_candle_effect(False, mesh_id=0xD361),
+            bytes.fromhex("43 08 d3 61 01 08 00 10 00 01 00 00 00 00 00 00"),
         ),
     )
     for actual, expected in checks:
