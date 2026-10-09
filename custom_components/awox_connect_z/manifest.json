@@ -23,5 +23,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/jakob8st8rm4nn/home-assistant-awox-connect-z/issues",
   "requirements": [],
-  "version": "1.10.0"
+  "version": "1.10.1"
 }

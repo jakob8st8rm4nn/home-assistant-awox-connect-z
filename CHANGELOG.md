@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.1] - 2026-10-09
+
+### Fixed
+
+- Run the long-lived availability worker as a Home Assistant background task so it no longer delays completion of startup.
+- Preserve Bluetooth advertisement history during setup and idle disconnect. Receive unchanged packets through the per-packet callback instead of clearing device records; retain the scanner-device lookup fallback for reconnects. Decode live state only from the received raw packet, avoiding stale merged state.
+
+### Compatibility
+
+- Require Home Assistant 2026.10 or newer. Live advertisement state correction requires raw packets from the Bluetooth source; sources without raw packets still update liveness and produce a warning.
+- Existing entries and options are retained. Update and restart Home Assistant; no reconfiguration is required.
+
 ## [1.10.0] - 2026-10-04
 
 ### Added

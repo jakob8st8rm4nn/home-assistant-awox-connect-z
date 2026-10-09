@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from bluetooth_data_tools import parse_advertisement_data_bytes
+
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 
@@ -138,6 +141,13 @@ async def async_setup_entry(
         ),
     )
 
+    # Per-packet delivery requires the Bluetooth API introduced in Core 2026.10.
+    if not hasattr(bluetooth, "async_register_advertisement_callback"):
+        raise ConfigEntryNotReady(
+            "AwoX Connect.Z requires the per-packet Bluetooth API "
+            "available in Home Assistant Core 2026.10"
+        )
+
     clients: list[tuple[AwoxConnectZClient, dict]] = []
 
     for device in raw_devices:
@@ -183,36 +193,82 @@ async def async_setup_entry(
         )
         clients.append((client, dict(device)))
 
+        packet_tracking = {"active": True, "warned_no_raw": False, "state_time": -1.0}
+
         @callback
         def _async_handle_advertisement(
             service_info: bluetooth.BluetoothServiceInfoBleak,
-            _change: bluetooth.BluetoothChange,
             *,
             _client: AwoxConnectZClient = client,
             _expected_mesh_id: int = mesh_id,
+            _tracking: dict = packet_tracking,
         ) -> None:
-            _client.async_note_bluetooth_liveness(service_info.time)
-
-            raw = service_info.manufacturer_data.get(AWOX_COMPANY_ID)
-            if raw is None:
+            if not _tracking["active"]:
                 return
-
-            state = parse_awox_advertisement(bytes(raw))
+            # The callback represents a received packet, not a history replay.
+            _client.async_note_bluetooth_liveness(service_info.time)
+            packet = getattr(service_info, "raw", None)
+            if packet is None:
+                # Merged manufacturer data can retain an old scan response.
+                # Do not turn it into a fresh hardware-state confirmation.
+                if not _tracking["warned_no_raw"]:
+                    _tracking["warned_no_raw"] = True
+                    _LOGGER.warning(
+                        "AwoX %s source=%s supplies no raw packet; "
+                        "liveness is updated but state decoding is skipped. "
+                        "Live state updates require a Bluetooth source that supplies raw advertisements",
+                        _client.mac, service_info.source,
+                    )
+                return
+            try:
+                manufacturer_data = parse_advertisement_data_bytes(bytes(packet))[3]
+            except (ValueError, IndexError, TypeError):
+                _LOGGER.debug("Ignoring invalid raw advertisement for AwoX %s", _client.mac)
+                return
+            raw = manufacturer_data.get(AWOX_COMPANY_ID)
+            state = parse_awox_advertisement(bytes(raw)) if raw is not None else None
             if state is None:
                 return
-
-            # Record the mesh address carried by every complete decoded status
-            # packet, even when it does not match configuration. A mismatch is
-            # diagnostic only: it never rewrites the stored mesh destination.
+            # Multiple proxies may deliver packets out of order. Equal timestamps
+            # remain eligible because short packets and scan responses can coincide.
+            if service_info.time < _tracking["state_time"]:
+                return
+            _tracking["state_time"] = service_info.time
             _client.async_note_advertised_mesh_id(
                 state.mesh_id, seen_time=service_info.time
             )
-
-            # Only trust state from the configured lamp and mesh destination.
             if state.mesh_id != _expected_mesh_id:
                 return
-
             _client.async_set_advertisement_state(state)
+
+        @callback
+        def _async_receive_packet(
+            service_info: bluetooth.BluetoothServiceInfoBleak,
+            *,
+            _handler=_async_handle_advertisement,
+        ) -> None:
+            # Packet callbacks run before HA updates its manager history. Defer
+            # entity/diagnostic reads until the current dispatch has completed.
+            hass.loop.call_soon(_handler, service_info)
+
+        @callback
+        def _async_active_scan_request(
+            service_info: bluetooth.BluetoothServiceInfoBleak,
+            change: bluetooth.BluetoothChange,
+        ) -> None:
+            # Keep the existing active-scan subscription, but decode state only
+            # through the per-packet callback above (no duplicate state path).
+            return
+
+        @callback
+        def _async_stop_packet_delivery(*, _tracking=packet_tracking) -> None:
+            # Also invalidate any call_soon callback already queued at unload.
+            _tracking["active"] = False
+
+        entry.async_on_unload(_async_stop_packet_delivery)
+        entry.async_on_unload(bluetooth.async_register_advertisement_callback(
+            hass, _async_receive_packet, mac
+        ))
 
         register_kwargs = {}
         replay_type = getattr(bluetooth, "BluetoothCallbackReplay", None)
@@ -223,7 +279,7 @@ async def async_setup_entry(
 
         unregister_advertisement = bluetooth.async_register_callback(
             hass,
-            _async_handle_advertisement,
+            _async_active_scan_request,
             {
                 "address": mac,
                 "manufacturer_id": AWOX_COMPANY_ID,
@@ -236,14 +292,8 @@ async def async_setup_entry(
         )
         entry.async_on_unload(unregister_advertisement)
 
-        # Do not replay an old cached packet as a fresh hardware state, but make
-        # sure the next real packet is delivered even when its payload is
-        # byte-for-byte identical to the packet Home Assistant saw previously.
-        clear_history = getattr(
-            bluetooth, "async_clear_advertisement_history", None
-        )
-        if clear_history is not None:
-            clear_history(hass, mac)
+        # Per-packet delivery includes unchanged advertisements; retain history
+        # so device lookup, source and RSSI are not erased during setup/reload.
 
         client.async_start_availability_tracking()
 

@@ -1,7 +1,7 @@
 # AwoX Connect.Z for Home Assistant
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
-[![Home Assistant 2026.3+](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-18BCF2.svg)](https://www.home-assistant.io/)
+[![Home Assistant 2026.10+](https://img.shields.io/badge/Home%20Assistant-2026.10%2B-18BCF2.svg)](https://www.home-assistant.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Unofficial integration for **EGLO / AwoX Connect.Z RGB/TW lights**, controlled locally
@@ -11,15 +11,6 @@ Normal light control does not use the cloud or require modified lamp firmware.
 
 > **Experimental / community-supported:** compatibility beyond the tested hardware
 > still needs confirmation.
-
-> **Known Home Assistant issue after idle disconnect:** In HA 2026.9.4, clearing
-> advertisement history can remove the Bluetooth device record needed to reconnect.
-> A command before the next advertisement may fail or be delayed, causing lamps to
-> respond at different times. The upstream fix is included in
-> [habluetooth 7.0.0](https://github.com/Bluetooth-Devices/habluetooth/releases/tag/v7.0.0).
-> Retest after installing a Home Assistant update that includes this correction;
-> no additional integration workaround is planned for now.
-> [Upstream issue/fix](https://github.com/Bluetooth-Devices/habluetooth/pull/613).
 
 ## AI-assisted development
 
@@ -42,8 +33,11 @@ review and device compatibility reports are welcome.
 
 ## Installation
 
-Requires **Home Assistant 2026.3+**, its Bluetooth integration, and a connectable
+Requires **Home Assistant 2026.10+**, its Bluetooth integration, and a connectable
 adapter or ESPHome Bluetooth Proxy within connection range of the lamps.
+Live state updates require a Bluetooth source that supplies raw advertisement
+packets; otherwise command control remains available but advertisement state
+correction is skipped and a warning is logged.
 
 **HACS:** Add `https://github.com/jakob8st8rm4nn/home-assistant-awox-connect-z` under
 **Custom repositories**, category **Integration**. Install **AwoX Connect.Z** and
@@ -52,12 +46,12 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.10.0:** Update and restart Home Assistant. Existing entries and saved
+**Updating to 1.10.1:** Update and restart Home Assistant. Existing entries and saved
 options are retained; no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Setup and lamp management
 
-Open **Settings → Devices & services → Add integration → AwoX Connect.Z**.
+Open **Settings â†’ Devices & services â†’ Add integration â†’ AwoX Connect.Z**.
 
 ### HomeControl import
 
@@ -121,12 +115,12 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 |---|---|---|
 | Transition | 0.2 s | Fade duration; use `0` for immediate changes. Explicit Home Assistant `transition` values override it. |
 | Idle disconnect | 10 s | Release the BLE connection after inactivity. A longer value can speed up repeated control but occupies a connection slot longer. |
-| Max Concurrent Commands | 2 | Allow 1–32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
-| Availability timeout | 30 s | Mark a lamp unavailable after 10–300 seconds without Bluetooth liveness or a working HA connection. |
+| Max Concurrent Commands | 2 | Allow 1â€“32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
+| Availability timeout | 30 s | Mark a lamp unavailable after 10â€“300 seconds without Bluetooth liveness or a working HA connection. |
 
 - **Connections:** New control connections are established one at a time across AwoX entries. Already-connected lamps can be controlled in parallel, within the configured limit.
 - **Rapid changes:** The newest waiting brightness and appearance target are kept. Static color, color temperature and native effects share one latest-wins appearance slot; brightness stays independent. Off discards older waiting changes; commands already being sent are allowed to finish.
-- **Off → on:** After a successful off write, commands that turn the lamp back on wait until 500 ms have elapsed. An off discarded before writing starts no delay.
+- **Off â†’ on:** After a successful off write, commands that turn the lamp back on wait until 500 ms have elapsed. An off discarded before writing starts no delay.
 - **Native effects:** Color cycle and Candle run in the lamp. Effects are prepared before switching an off lamp on; switching effects uses the matching stop command. Unknown effect state is tracked internally until confirmed. See the [protocol reference](docs/protocol.md) for mode tables and command details.
 - **Lamp state:** Bluetooth advertisements correct power, brightness, color mode and native effect state. These updates can pause while Home Assistant or the phone app holds a connection; idle disconnect alone does not make the lamp unavailable.
 

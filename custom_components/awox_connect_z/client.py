@@ -562,7 +562,7 @@ class AwoxConnectZClient:
                 if asyncio.current_task() is self._availability_task:
                     self._availability_task = None
 
-        self._availability_task = self.hass.async_create_task(
+        self._availability_task = self.hass.async_create_background_task(
             _worker(), f"AwoX Connect.Z availability {self.mac}"
         )
 
@@ -631,6 +631,16 @@ class AwoxConnectZClient:
             device = async_ble_device_from_address(
                 self.hass, self.mac, connectable=False
             )
+        if device is None:
+            scanner_devices = bluetooth.async_scanner_devices_by_address(
+                self.hass, self.mac, connectable=True
+            )
+            if scanner_devices:
+                device = scanner_devices[0].ble_device
+                _LOGGER.debug(
+                    "Using retained Bluetooth scanner device entry for AwoX %s",
+                    self.mac,
+                )
         if device is None:
             raise AwoxDeviceNotFound(
                 f"AwoX Connect.Z {self.mac} has no current Bluetooth device entry"
@@ -959,14 +969,8 @@ class AwoxConnectZClient:
         if was_connected and mark_liveness:
             self._async_note_connection_liveness()
 
-        # Home Assistant deduplicates identical advertisements. Clear the
-        # per-address history only after the GATT cleanup has finished.
-        clear_history = getattr(
-            bluetooth, "async_clear_advertisement_history", None
-        )
-        if clear_history is not None:
-            with suppress(Exception):
-                clear_history(self.hass, self.mac)
+        # Per-packet callbacks deliver unchanged advertisements.
+        # Preserve manager/scanner history across a normal GATT disconnect.
 
         if cancelled:
             raise asyncio.CancelledError
