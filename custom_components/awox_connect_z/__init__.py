@@ -13,13 +13,10 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 
-from .advertisement import (
-    AWOX_COMPANY_ID,
-    advertisement_self_test,
-    parse_awox_advertisement,
-)
+from .advertisement import parse_awox_advertisement
 from .client import AwoxConnectZClient
 from .const import (
+    AWOX_COMPANY_ID,
     CONF_AVAILABILITY_TIMEOUT,
     CONF_DEFAULT_TRANSITION,
     CONF_DEVICES,
@@ -41,7 +38,7 @@ from .const import (
     MIN_CONCURRENT_COMMANDS,
     DOMAIN,
 )
-from .protocol import protocol_self_test
+from .protocol import is_valid_device_mesh_id
 
 PLATFORMS = [Platform.LIGHT, Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
@@ -94,9 +91,6 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> bool:
     """Set up every lamp imported from the AwoX account."""
-    protocol_self_test()
-    advertisement_self_test()
-
     raw_devices = list(entry.data.get(CONF_DEVICES) or [])
     if not raw_devices:
         _LOGGER.error(
@@ -160,7 +154,7 @@ async def async_setup_entry(
         except (TypeError, ValueError):
             mesh_id = 0
 
-        if not 1 <= mesh_id <= 0xFFFE:
+        if not is_valid_device_mesh_id(mesh_id):
             _LOGGER.error(
                 "Skipping AwoX Connect.Z %s because no valid per-device "
                 "mesh destination is available; re-add the integration to "

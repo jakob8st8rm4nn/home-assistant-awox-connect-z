@@ -21,12 +21,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .client import AwoxConnectZClient
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    RSSI_MIN_PUBLISH_INTERVAL_SECONDS,
+    RSSI_SIGNIFICANT_CHANGE_DBM,
+)
 
 
 _UNSET = object()
-RSSI_MIN_PUBLISH_INTERVAL = 5.0
-RSSI_SIGNIFICANT_CHANGE_DBM = 5
 
 
 SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
@@ -218,7 +220,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
             and previous is not _UNSET
             and isinstance(previous, (int, float))
             and isinstance(value, (int, float))
-            and now - self._last_published_at < RSSI_MIN_PUBLISH_INTERVAL
+            and now - self._last_published_at < RSSI_MIN_PUBLISH_INTERVAL_SECONDS
             and abs(value - previous) < RSSI_SIGNIFICANT_CHANGE_DBM
         ):
             return

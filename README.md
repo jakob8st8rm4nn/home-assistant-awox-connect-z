@@ -46,7 +46,7 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.10.1:** Update and restart Home Assistant. Existing entries and saved
+**Updating to 1.10.2:** Update and restart Home Assistant. Existing entries and saved
 options are retained; no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Setup and lamp management

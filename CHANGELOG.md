@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.2] - 2026-10-09
+
+### Changed
+
+- Centralize intentionally configured runtime, setup, cloud, light and diagnostic operating values in `const.py` without changing their values or behavior.
+- Remove the unused duplicate `PLATFORMS` constant and name the setup/reconfigure connector-attempt limit explicitly.
+- Share individual-device mesh address validation and UTF-8 credential size limits while retaining separate AES and packet-size checks.
+- Remove the unused `async_send_plain()` convenience method.
+- Remove the built-in protocol and advertisement self-checks previously executed during integration setup; normal command encoding and advertisement decoding remain unchanged.
+- Clarify that the 500 ms power-off settling guard applies only after a successful off write and only before a later command that can turn the lamp on.
+
 ## [1.10.1] - 2026-10-09
 
 ### Fixed

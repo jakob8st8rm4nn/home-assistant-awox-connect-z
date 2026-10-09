@@ -24,23 +24,31 @@ from homeassistant.util import dt as dt_util
 
 from .advertisement import AwoxAdvertisementState
 from .const import (
-    AVAILABILITY_RECOVERY_POLL,
-    DEFAULT_AVAILABILITY_TIMEOUT,
+    AUTH_RESPONSE_SETTLE_SECONDS,
+    AVAILABILITY_MIN_WAIT_SECONDS,
+    AVAILABILITY_RECOVERY_POLL_SECONDS,
     COMMAND_CHAR_UUID,
+    DEFAULT_AVAILABILITY_TIMEOUT,
+    DISCONNECT_TIMEOUT_SECONDS,
+    DISCOVERY_ATTEMPTS,
+    DISCOVERY_RETRY_BASE_DELAY_SECONDS,
+    DISCOVERY_RETRY_MAX_DELAY_SECONDS,
+    MIN_CONCURRENT_COMMANDS,
+    MIN_IDLE_DISCONNECT,
+    MIN_TRANSITION,
     PAIR_CHAR_UUID,
+    RUNTIME_AUTH_TIMEOUT_SECONDS,
+    RUNTIME_COMMAND_TIMEOUT_SECONDS,
+    RUNTIME_CONNECT_QUEUE_LOG_THRESHOLD_SECONDS,
+    RUNTIME_CONNECT_QUEUE_TIMEOUT_SECONDS,
+    RUNTIME_CONNECT_TIMEOUT_SECONDS,
+    RUNTIME_WRITE_ATTEMPTS,
+    RUNTIME_WRITE_TIMEOUT_SECONDS,
+    SETUP_CONNECT_ATTEMPTS,
 )
 from .protocol import encrypt_command, make_pair_packet, make_session_key
 
 _LOGGER = logging.getLogger(__name__)
-
-DISCOVERY_ATTEMPTS = 5
-RUNTIME_WRITE_ATTEMPTS = 2
-RUNTIME_COMMAND_TIMEOUT = 30.0
-RUNTIME_CONNECT_TIMEOUT = 12.0
-RUNTIME_CONNECT_QUEUE_TIMEOUT = 30.0
-RUNTIME_AUTH_TIMEOUT = 4.0
-RUNTIME_WRITE_TIMEOUT = 4.0
-DISCONNECT_TIMEOUT = 12.0
 
 
 class AwoxConnectZError(HomeAssistantError):
@@ -77,10 +85,12 @@ class AwoxConnectZClient:
         self.mac = mac
         self.mesh_name = mesh_name
         self.mesh_password = mesh_password
-        self.default_transition = max(0.0, float(default_transition))
-        self.idle_disconnect = max(5.0, float(idle_disconnect))
+        self.default_transition = max(MIN_TRANSITION, float(default_transition))
+        self.idle_disconnect = max(MIN_IDLE_DISCONNECT, float(idle_disconnect))
         self.availability_timeout = max(0.0, float(availability_timeout))
-        self.max_concurrent_commands = max(1, int(max_concurrent_commands))
+        self.max_concurrent_commands = max(
+            MIN_CONCURRENT_COMMANDS, int(max_concurrent_commands)
+        )
         self._command_semaphore = command_semaphore
         # Runtime clients created by async_setup_entry share one lock across all
         # AwoX config entries. Config-flow verifier clients may omit it because
@@ -534,7 +544,8 @@ class AwoxConnectZClient:
                         if age < self.availability_timeout:
                             self._async_set_available(True)
                             wait_seconds = max(
-                                0.05, self.availability_timeout - age
+                                AVAILABILITY_MIN_WAIT_SECONDS,
+                                self.availability_timeout - age,
                             )
                         else:
                             self._async_set_available(False)
@@ -543,7 +554,7 @@ class AwoxConnectZClient:
                             # before integration callbacks. While unavailable, poll
                             # that timestamp briefly so unchanged packets restore
                             # availability as soon as practical.
-                            wait_seconds = AVAILABILITY_RECOVERY_POLL
+                            wait_seconds = AVAILABILITY_RECOVERY_POLL_SECONDS
 
                     try:
                         await asyncio.wait_for(
@@ -666,7 +677,12 @@ class AwoxConnectZClient:
                     attempt,
                     DISCOVERY_ATTEMPTS,
                 )
-                await asyncio.sleep(min(1.5 * attempt, 4.0))
+                await asyncio.sleep(
+                    min(
+                        DISCOVERY_RETRY_BASE_DELAY_SECONDS * attempt,
+                        DISCOVERY_RETRY_MAX_DELAY_SECONDS,
+                    )
+                )
 
         raise AwoxDeviceNotFound(
             f"AwoX Connect.Z {self.mac} is not currently visible via Bluetooth"
@@ -684,7 +700,7 @@ class AwoxConnectZClient:
         await self._client.write_gatt_char(
             PAIR_CHAR_UUID, pair_packet, response=True
         )
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(AUTH_RESPONSE_SETTLE_SECONDS)
         reply = bytes(await self._client.read_gatt_char(PAIR_CHAR_UUID))
 
         if len(reply) < 9:
@@ -723,12 +739,12 @@ class AwoxConnectZClient:
 
         try:
             try:
-                async with asyncio.timeout(RUNTIME_CONNECT_QUEUE_TIMEOUT):
+                async with asyncio.timeout(RUNTIME_CONNECT_QUEUE_TIMEOUT_SECONDS):
                     await self._runtime_connect_lock.acquire()
             except TimeoutError as err:
                 raise AwoxConnectZError(
                     "Timed out after "
-                    f"{RUNTIME_CONNECT_QUEUE_TIMEOUT:.1f}s waiting for the "
+                    f"{RUNTIME_CONNECT_QUEUE_TIMEOUT_SECONDS:.1f}s waiting for the "
                     "AwoX runtime BLE connection queue"
                 ) from err
         finally:
@@ -742,7 +758,7 @@ class AwoxConnectZClient:
                 command_timeout.reschedule(previous_deadline + waited)
 
         waited = loop.time() - wait_started
-        if waited >= 0.05:
+        if waited >= RUNTIME_CONNECT_QUEUE_LOG_THRESHOLD_SECONDS:
             _LOGGER.debug(
                 "AwoX %s waited %.3fs for shared runtime BLE connect slot",
                 self.mac,
@@ -776,7 +792,7 @@ class AwoxConnectZClient:
                         BleakClientWithServiceCache,
                         device,
                         device.name or f"AwoX Connect.Z {self.mac}",
-                        max_attempts=4,
+                        max_attempts=SETUP_CONNECT_ATTEMPTS,
                     )
                     self._client = client
                     await self._async_authenticate()
@@ -814,9 +830,9 @@ class AwoxConnectZClient:
                     self._client = client
 
                     try:
-                        async with asyncio.timeout(RUNTIME_CONNECT_TIMEOUT):
+                        async with asyncio.timeout(RUNTIME_CONNECT_TIMEOUT_SECONDS):
                             await client.connect(
-                                timeout=RUNTIME_CONNECT_TIMEOUT,
+                                timeout=RUNTIME_CONNECT_TIMEOUT_SECONDS,
                                 dangerous_use_bleak_cache=use_cache,
                             )
                     except asyncio.CancelledError:
@@ -828,7 +844,7 @@ class AwoxConnectZClient:
                         await self._async_disconnect(cancel_idle=False)
                         raise AwoxConnectZError(
                             f"Runtime BLE connect timed out after "
-                            f"{RUNTIME_CONNECT_TIMEOUT:.1f}s"
+                            f"{RUNTIME_CONNECT_TIMEOUT_SECONDS:.1f}s"
                         ) from err
                     except Exception as err:
                         await self._async_disconnect(cancel_idle=False)
@@ -840,7 +856,7 @@ class AwoxConnectZClient:
 
             async def _authenticate_once() -> None:
                 try:
-                    async with asyncio.timeout(RUNTIME_AUTH_TIMEOUT):
+                    async with asyncio.timeout(RUNTIME_AUTH_TIMEOUT_SECONDS):
                         await self._async_authenticate()
                 except asyncio.CancelledError:
                     await self._async_disconnect(cancel_idle=False)
@@ -848,7 +864,7 @@ class AwoxConnectZClient:
                 except TimeoutError as err:
                     raise AwoxConnectZError(
                         f"Runtime AwoX authentication timed out after "
-                        f"{RUNTIME_AUTH_TIMEOUT:.1f}s"
+                        f"{RUNTIME_AUTH_TIMEOUT_SECONDS:.1f}s"
                     ) from err
 
             await _connect_once(use_cache=True)
@@ -920,12 +936,12 @@ class AwoxConnectZClient:
 
         async def _cleanup_client() -> None:
             try:
-                async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                async with asyncio.timeout(DISCONNECT_TIMEOUT_SECONDS):
                     await client.disconnect()
             except TimeoutError:
                 _LOGGER.warning(
                     "Timed out after %.1fs while disconnecting AwoX %s",
-                    DISCONNECT_TIMEOUT,
+                    DISCONNECT_TIMEOUT_SECONDS,
                     self.mac,
                 )
             except asyncio.CancelledError:
@@ -1045,7 +1061,7 @@ class AwoxConnectZClient:
             async with self._command_lock:
                 try:
                     async with asyncio.timeout(
-                        RUNTIME_COMMAND_TIMEOUT
+                        RUNTIME_COMMAND_TIMEOUT_SECONDS
                     ) as command_timeout:
                         return await self._async_send_selected_locked(
                             _select,
@@ -1062,13 +1078,13 @@ class AwoxConnectZClient:
                     if selected_label is None:
                         message = (
                             "AwoX command preparation exceeded the "
-                            f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
+                            f"{RUNTIME_COMMAND_TIMEOUT_SECONDS:.1f}s runtime budget"
                         )
                         stage = "command_preparation"
                     else:
                         message = (
                             f"Command '{selected_label}' exceeded the "
-                            f"{RUNTIME_COMMAND_TIMEOUT:.1f}s runtime budget"
+                            f"{RUNTIME_COMMAND_TIMEOUT_SECONDS:.1f}s runtime budget"
                         )
                         stage = "command_runtime"
                     self._record_error(
@@ -1138,7 +1154,7 @@ class AwoxConnectZClient:
                     )
 
                 packet = encrypt_command(self._session_key, plain16)
-                async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT):
+                async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT_SECONDS):
                     await self._client.write_gatt_char(
                         COMMAND_CHAR_UUID, packet, response=True
                     )
@@ -1156,7 +1172,7 @@ class AwoxConnectZClient:
             except TimeoutError as err:
                 last_exception = AwoxConnectZError(
                     f"GATT write timed out after "
-                    f"{RUNTIME_WRITE_TIMEOUT:.1f}s"
+                    f"{RUNTIME_WRITE_TIMEOUT_SECONDS:.1f}s"
                 )
                 last_exception.__cause__ = err
             except Exception as err:
@@ -1209,10 +1225,6 @@ class AwoxConnectZClient:
             f"{RUNTIME_WRITE_ATTEMPTS} write attempt(s): "
             f"{last_exception}"
         ) from last_exception
-
-    async def async_send_plain(self, plain16: bytes, *, label: str) -> None:
-        """Send one fixed runtime command through the late-selection path."""
-        await self.async_send_selected(lambda: (plain16, label))
 
     async def async_close(self) -> None:
         """Stop timers and release the BLE connection."""

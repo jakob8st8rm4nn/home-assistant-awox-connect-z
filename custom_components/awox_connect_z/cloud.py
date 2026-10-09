@@ -16,7 +16,13 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import PARSE_APP_ID, PARSE_CLIENT_KEY, PARSE_URLS
+from .const import (
+    CLOUD_REQUEST_TIMEOUT_SECONDS,
+    MESH_CREDENTIAL_MAX_BYTES,
+    PARSE_APP_ID,
+    PARSE_CLIENT_KEY,
+    PARSE_URLS,
+)
 
 _MAC_HEX_RE = re.compile(r"^[0-9A-Fa-f]{12}$")
 
@@ -66,7 +72,7 @@ async def _post_json(
     payload: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
     session = async_get_clientsession(hass)
-    async with asyncio.timeout(20):
+    async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SECONDS):
         async with session.post(url, headers=headers, json=payload) as response:
             try:
                 data = await response.json(content_type=None)
@@ -388,8 +394,10 @@ async def async_import_account(
         if not candidate_name or not candidate_password:
             continue
         if (
-            len(candidate_name.encode("utf-8")) > 16
-            or len(candidate_password.encode("utf-8")) > 16
+            len(candidate_name.encode("utf-8"))
+            > MESH_CREDENTIAL_MAX_BYTES
+            or len(candidate_password.encode("utf-8"))
+            > MESH_CREDENTIAL_MAX_BYTES
         ):
             continue
         mesh_name = candidate_name

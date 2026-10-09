@@ -35,6 +35,7 @@ from .const import (
     MAX_COLOR_TEMP_KELVIN,
     MIN_COLOR_TEMP_KELVIN,
     NATIVE_EFFECTS,
+    POWER_OFF_SETTLE_SECONDS,
 )
 from .protocol import (
     ha_brightness_to_device,
@@ -86,12 +87,6 @@ class _InFlightCommand:
 # Home Assistant's platform semaphore is static. The integration uses a
 # per-config-entry semaphore so the limit can be changed in Options.
 PARALLEL_UPDATES = 0
-
-# Hardware settling guard: Connect.Z lamps can apply a very recent power-off
-# after a newer turn-on-style command when both writes are too close together.
-# Only commands that can turn the lamp back on are delayed, and only after an
-# off command was actually written successfully.
-POWER_OFF_SETTLE_SECONDS = 0.5
 
 
 async def async_setup_entry(

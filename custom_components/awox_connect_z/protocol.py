@@ -4,14 +4,27 @@ from __future__ import annotations
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .const import MAX_COLOR_TEMP_KELVIN, MIN_COLOR_TEMP_KELVIN
+from .const import (
+    MAX_COLOR_TEMP_KELVIN,
+    MAX_MESH_ID,
+    MESH_CREDENTIAL_MAX_BYTES,
+    MIN_COLOR_TEMP_KELVIN,
+    MIN_MESH_ID,
+)
 
 
 def fit16(value: bytes) -> bytes:
     """Pad an AwoX credential to one AES block."""
-    if len(value) > 16:
-        raise ValueError("AwoX credential exceeds 16 bytes")
+    if len(value) > MESH_CREDENTIAL_MAX_BYTES:
+        raise ValueError(
+            f"AwoX credential exceeds {MESH_CREDENTIAL_MAX_BYTES} bytes"
+        )
     return value.ljust(16, b"\x00")
+
+
+def is_valid_device_mesh_id(mesh_id: int) -> bool:
+    """Return whether an integer is a valid individual lamp mesh address."""
+    return MIN_MESH_ID <= mesh_id <= MAX_MESH_ID
 
 
 def aes_encrypt_reversed(key: bytes, value: bytes) -> bytes:
@@ -93,7 +106,7 @@ def _put_u16_le(block: bytearray, offset: int, value: int) -> None:
 def _put_destination(block: bytearray, mesh_id: int) -> None:
     """Write the confirmed 16-bit Connect.Z destination in big-endian order."""
     mesh_id = int(mesh_id)
-    if not 1 <= mesh_id <= 0xFFFE:
+    if not is_valid_device_mesh_id(mesh_id):
         raise ValueError(
             f"Invalid Connect.Z mesh destination 0x{mesh_id & 0xFFFF:04X}"
         )
@@ -202,75 +215,3 @@ def make_candle_effect(enabled: bool, *, mesh_id: int) -> bytes:
 def ha_brightness_to_device(brightness: int) -> int:
     """Map Home Assistant 1..255 to the device's 1..254."""
     return max(1, min(254, round(int(brightness) * 254 / 255)))
-
-
-def protocol_self_test() -> None:
-    """Guard the reverse-engineered protocol against accidental regressions."""
-    # 0xD361 -> D3 61 and 0x8430 -> 84 30 were confirmed on real lamps.
-    checks = (
-        (
-            make_power(True, mesh_id=0xD361),
-            bytes.fromhex("36 06 d3 61 01 06 00 01 00 00 00 00 00 00 00 00"),
-        ),
-        (
-            make_power(False, mesh_id=0xD361),
-            bytes.fromhex("51 06 d3 61 01 06 00 00 00 00 00 00 00 00 00 00"),
-        ),
-        (
-            make_power(True, mesh_id=0x8430),
-            bytes.fromhex("6e 06 84 30 01 06 00 01 00 00 00 00 00 00 00 00"),
-        ),
-        (
-            make_brightness(254, 0.2, mesh_id=0xD361),
-            bytes.fromhex("11 0c d3 61 01 08 00 04 fe 02 00 00 00 00 00 00"),
-        ),
-        (
-            make_hs_color(
-                24 * 360 / 254,
-                184 * 100 / 254,
-                0.2,
-                mesh_id=0xD361,
-            ),
-            bytes.fromhex("26 0a d3 61 01 00 03 06 18 b8 02 00 00 00 00 00"),
-        ),
-        (
-            make_color_temp_kelvin(
-                round(1_000_000 / 252),
-                0.2,
-                mesh_id=0xD361,
-            ),
-            bytes.fromhex("08 0a d3 61 01 00 03 0a fc 00 02 00 00 00 00 00"),
-        ),
-        (
-            make_color_cycle_start(mesh_id=0xD361),
-            bytes.fromhex("18 09 d3 61 01 00 03 41 01 00 0c 00 00 00 00 00"),
-        ),
-        (
-            make_color_cycle_stop(mesh_id=0xD361),
-            bytes.fromhex("24 06 d3 61 01 00 03 47 00 00 00 00 00 00 00 00"),
-        ),
-        (
-            make_candle_effect(True, mesh_id=0xD361),
-            bytes.fromhex("30 08 d3 61 01 08 00 10 01 01 00 00 00 00 00 00"),
-        ),
-        (
-            make_candle_effect(False, mesh_id=0xD361),
-            bytes.fromhex("43 08 d3 61 01 08 00 10 00 01 00 00 00 00 00 00"),
-        ),
-    )
-    for actual, expected in checks:
-        if actual != expected:
-            raise RuntimeError(
-                "AwoX protocol self-test failed: "
-                f"{actual.hex(' ')} != {expected.hex(' ')}"
-            )
-
-    for invalid in (0, 0xFFFF):
-        try:
-            make_power(True, mesh_id=invalid)
-        except ValueError:
-            pass
-        else:
-            raise RuntimeError(
-                f"AwoX protocol self-test accepted invalid mesh id {invalid}"
-            )

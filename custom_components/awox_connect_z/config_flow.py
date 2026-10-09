@@ -34,7 +34,6 @@ from homeassistant.helpers.selector import (
 )
 
 from .advertisement import (
-    AWOX_COMPANY_ID,
     advertisement_matches_address,
     parse_awox_advertisement,
 )
@@ -49,6 +48,8 @@ from .cloud import (
     async_import_account,
 )
 from .const import (
+    AWOX_COMPANY_ID,
+    ADDITIONAL_DISCOVERY_TIMEOUT_SECONDS,
     CONF_AVAILABILITY_TIMEOUT,
     CONF_DEFAULT_TRANSITION,
     CONF_DEVICES,
@@ -62,28 +63,32 @@ from .const import (
     CONF_OWNER_ID,
     CONF_SETUP_METHOD,
     DEFAULT_AVAILABILITY_TIMEOUT,
+    LOCAL_DISCOVERY_SCAN_SECONDS,
+    LOCAL_VERIFICATION_CONCURRENCY,
+    LOCAL_VERIFICATION_TIMEOUT_SECONDS,
     DEFAULT_IDLE_DISCONNECT,
     DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_TRANSITION,
     MAX_AVAILABILITY_TIMEOUT,
+    MAX_IDLE_DISCONNECT,
+    MAX_TRANSITION,
     MAX_CONCURRENT_COMMANDS,
+    MESH_CREDENTIAL_MAX_BYTES,
     MIN_AVAILABILITY_TIMEOUT,
+    MIN_IDLE_DISCONNECT,
+    MIN_TRANSITION,
     MIN_CONCURRENT_COMMANDS,
     SETUP_METHOD_CLOUD,
     SETUP_METHOD_LOCAL,
     DOMAIN,
 )
-
+from .protocol import is_valid_device_mesh_id
 
 
 class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
     """Set up AwoX Connect.Z lights from cloud import or local mesh data."""
 
     VERSION = 2
-    ADDITIONAL_DISCOVERY_TIMEOUT = 30
-    LOCAL_DISCOVERY_SCAN_SECONDS = 30
-    LOCAL_VERIFICATION_TIMEOUT = 20.0
-    LOCAL_VERIFICATION_CONCURRENCY = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -143,7 +148,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             encoded = value.encode("utf-8")
         except UnicodeEncodeError:
             return "mesh_credential_invalid"
-        if len(encoded) > 16:
+        if len(encoded) > MESH_CREDENTIAL_MAX_BYTES:
             return "mesh_credential_too_long"
         return None
 
@@ -155,7 +160,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             mesh_id = int(raw, 16) if raw.lower().startswith("0x") else int(raw, 10)
         except (TypeError, ValueError):
             return None
-        return mesh_id if 1 <= mesh_id <= 0xFFFE else None
+        return mesh_id if is_valid_device_mesh_id(mesh_id) else None
 
     @staticmethod
     def _local_device_record(
@@ -313,7 +318,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             return None
 
         state = parse_awox_advertisement(data)
-        if state is None or not 1 <= state.mesh_id <= 0xFFFE:
+        if state is None or not is_valid_device_mesh_id(state.mesh_id):
             return None
 
         name = self._discovery_display_name(service_info, address)
@@ -411,7 +416,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             if request_active_scan is not None:
                 try:
                     await request_active_scan(
-                        self.hass, self.LOCAL_DISCOVERY_SCAN_SECONDS
+                        self.hass, LOCAL_DISCOVERY_SCAN_SECONDS
                     )
                 except Exception:
                     # Keep collecting advertisements through the already
@@ -419,7 +424,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                     # asyncio.CancelledError is intentionally not swallowed.
                     self._local_scan_error = True
 
-            remaining = self.LOCAL_DISCOVERY_SCAN_SECONDS - (
+            remaining = LOCAL_DISCOVERY_SCAN_SECONDS - (
                 time.monotonic() - wait_started
             )
             if remaining > 0:
@@ -528,7 +533,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         if not to_verify:
             return devices, None, ""
 
-        limiter = asyncio.Semaphore(self.LOCAL_VERIFICATION_CONCURRENCY)
+        limiter = asyncio.Semaphore(LOCAL_VERIFICATION_CONCURRENCY)
 
         async def _verify_one(address: str) -> tuple[str, str | None]:
             async with limiter:
@@ -610,7 +615,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             availability_timeout=DEFAULT_AVAILABILITY_TIMEOUT,
         )
         try:
-            async with asyncio.timeout(self.LOCAL_VERIFICATION_TIMEOUT):
+            async with asyncio.timeout(LOCAL_VERIFICATION_TIMEOUT_SECONDS):
                 await verifier.async_verify_mesh_credentials()
         except AwoxAuthenticationError:
             return "invalid_mesh_credentials"
@@ -784,7 +789,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 "connectable": True,
             },
             bluetooth.BluetoothScanningMode.ACTIVE,
-            self.ADDITIONAL_DISCOVERY_TIMEOUT,
+            ADDITIONAL_DISCOVERY_TIMEOUT_SECONDS,
         )
 
     async def _async_matching_account(
@@ -1108,7 +1113,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "count": str(len(self._local_candidates)),
-                "seconds": str(self.LOCAL_DISCOVERY_SCAN_SECONDS),
+                "seconds": str(LOCAL_DISCOVERY_SCAN_SECONDS),
                 "failed_device": self._local_failed_device,
                 "entered_mesh_id": self._local_conflict_entered_id,
                 "advertised_mesh_id": self._local_conflict_advertised_id,
@@ -1155,7 +1160,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                             advertised = parse_awox_advertisement(data)
                             if (
                                 advertised is not None
-                                and 1 <= advertised.mesh_id <= 0xFFFE
+                                and is_valid_device_mesh_id(advertised.mesh_id)
                             ):
                                 observed_mesh_id = advertised.mesh_id
                                 self._local_observed_mesh_ids[address] = (
@@ -1298,7 +1303,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="identity_mismatch")
 
         state = parse_awox_advertisement(data)
-        if state is None or not 1 <= state.mesh_id <= 0xFFFE:
+        if state is None or not is_valid_device_mesh_id(state.mesh_id):
             return self.async_abort(reason="incomplete_advertisement")
 
         self._discovered_address = address
@@ -1743,7 +1748,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "count": str(len(self._local_candidates)),
-                "seconds": str(self.LOCAL_DISCOVERY_SCAN_SECONDS),
+                "seconds": str(LOCAL_DISCOVERY_SCAN_SECONDS),
                 "existing_count": str(
                     len(list(reconfigure_entry.data.get(CONF_DEVICES) or []))
                 ),
@@ -1782,7 +1787,7 @@ class AwoxConnectZOptionsFlow(OptionsFlowWithReload):
                     ),
                 ): vol.All(
                     vol.Coerce(float),
-                    vol.Range(min=0.0, max=10.0),
+                    vol.Range(min=MIN_TRANSITION, max=MAX_TRANSITION),
                 ),
                 vol.Required(
                     CONF_IDLE_DISCONNECT,
@@ -1792,7 +1797,7 @@ class AwoxConnectZOptionsFlow(OptionsFlowWithReload):
                     ),
                 ): vol.All(
                     vol.Coerce(float),
-                    vol.Range(min=5.0, max=300.0),
+                    vol.Range(min=MIN_IDLE_DISCONNECT, max=MAX_IDLE_DISCONNECT),
                 ),
                 vol.Required(
                     CONF_AVAILABILITY_TIMEOUT,
