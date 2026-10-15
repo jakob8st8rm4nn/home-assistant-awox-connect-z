@@ -114,7 +114,9 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         )
 
         if description.key == "bluetooth_status":
-            self._attr_options = ["connected", "visible", "unreachable"]
+            self._attr_options = [
+                "connected", "visible", "unreachable"
+            ]
 
         device_name = str(device.get("name") or f"AwoX {mac[-8:]}")
         model = str(device.get("model") or "Connect.Z RGB/TW")

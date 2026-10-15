@@ -35,9 +35,11 @@ review and device compatibility reports are welcome.
 
 Requires **Home Assistant 2026.10+**, its Bluetooth integration, and a connectable
 adapter or ESPHome Bluetooth Proxy within connection range of the lamps.
-Live state updates require a Bluetooth source that supplies raw advertisement
-packets; otherwise command control remains available but advertisement state
-correction is skipped and a warning is logged.
+Control requires a valid state advertisement before the first command after setup
+or reload. The Bluetooth source must supply raw advertisement packets. Requests
+are rejected while the lamp state required for command planning is unknown. If
+that state becomes unknown during a request, pending work is aborted with an error
+instead of waiting for a later advertisement.
 
 **HACS:** Add `https://github.com/jakob8st8rm4nn/home-assistant-awox-connect-z` under
 **Custom repositories**, category **Integration**. Install **AwoX Connect.Z** and
@@ -46,12 +48,12 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating to 1.10.2:** Update and restart Home Assistant. Existing entries and saved
+**Updating:** Update and restart Home Assistant. Existing entries and saved
 options are retained; no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Setup and lamp management
 
-Open **Settings â†’ Devices & services â†’ Add integration â†’ AwoX Connect.Z**.
+Open **Settings → Devices & services → Add integration → AwoX Connect.Z**.
 
 ### HomeControl import
 
@@ -94,14 +96,23 @@ lamps or lamps with different mesh credentials cannot join through that flow.
 
 | Sensor | Meaning |
 |---|---|
-| Signal Strength | Bluetooth signal strength (RSSI). |
+| Signal Strength | Last-known advertisement RSSI while connected or during post-disconnect grace; otherwise requires a recent packet. |
 | Last Seen | Time of the last received Bluetooth advertisement. |
-| Bluetooth Status | Connected, visible or unreachable; initially unknown until Bluetooth liveness is confirmed. |
+| Bluetooth Status | Connected with active BLE; visible with a recent advertisement or during idle-disconnect grace; unreachable after expiry. Initially unknown without current evidence. |
 | Mesh ID | Stored mesh address; attributes show the advertised address and whether it matches. |
-| Current Bluetooth Source | Adapter/proxy supplying Home Assistant's currently preferred advertisement. |
+| Current Bluetooth Source | Last-known preferred advertisement source while connected or during post-disconnect grace; otherwise requires a recent packet. |
 | Last Connection | Adapter/proxy used for the last successful connection, when identifiable. |
 
 Diagnostics use existing Bluetooth data without creating additional connections.
+Cached advertisements retain their original reception time across reloads; only
+packets within the availability timeout count as visible. Startup grace does not
+confirm visibility. While BLE-connected, source and RSSI retain their last-known
+values until advertisements update them. This does not refresh Last Seen. After
+a regular idle disconnect, these values remain for the configured availability
+timeout (30 s by default). A new advertisement resumes normal packet freshness;
+without one, source/RSSI become unknown and status becomes unreachable when the
+grace period expires. Reloading does not create post-disconnect grace. Last Seen and Last
+Connection retain their historical meaning.
 The diagnostic download includes command timing and write attempts, historical errors
 with command context, connection timestamps and the last observed mesh-ID timestamp.
 Command duration covers the client operation, excluding earlier entity waiting.
@@ -114,23 +125,30 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 | Setting | Default | Purpose |
 |---|---|---|
 | Transition | 0.2 s | Fade duration; use `0` for immediate changes. Explicit Home Assistant `transition` values override it. |
+| Command interval | 250 ms | Minimum spacing between consecutive writes to the same lamp; configurable from 0–2000 ms. |
 | Idle disconnect | 10 s | Release the BLE connection after inactivity. A longer value can speed up repeated control but occupies a connection slot longer. |
-| Max Concurrent Commands | 2 | Allow 1â€“32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
-| Availability timeout | 30 s | Mark a lamp unavailable after 10â€“300 seconds without Bluetooth liveness or a working HA connection. |
+| Max Concurrent Commands | 2 | Allow 1–32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
+| Availability timeout | 30 s | Mark a lamp unavailable after 10–300 seconds without Bluetooth liveness or a working HA connection. |
 
 - **Connections:** New control connections are established one at a time across AwoX entries. Already-connected lamps can be controlled in parallel, within the configured limit.
-- **Rapid changes:** The newest waiting brightness and appearance target are kept. Static color, color temperature and native effects share one latest-wins appearance slot; brightness stays independent. Off discards older waiting changes; commands already being sent are allowed to finish.
-- **Off â†’ on:** After a successful off write, commands that turn the lamp back on wait until 500 ms have elapsed. An off discarded before writing starts no delay.
-- **Native effects:** Color cycle and Candle run in the lamp. Effects are prepared before switching an off lamp on; switching effects uses the matching stop command. Unknown effect state is tracked internally until confirmed. See the [protocol reference](docs/protocol.md) for mode tables and command details.
+- **Rapid changes:** Pending power, brightness, appearance and effect intent are merged by the command manager. Newer values replace only the relevant target slots; unsent work is replanned against the latest known lamp state. A successful brightness write creates a manager-owned power-finalizer obligation that survives ordinary replanning.
+- **Combined commands:** Brightness, color/CCT and native-effect targets can be submitted together. Requests are normalized first (for example, Power OFF/brightness 0 dominates the same request), then the sequence planner applies the documented order for OFF/ON/effect states.
+- **Command spacing:** The command manager enforces the configured minimum interval between every two writes to the same lamp, including manager-approved retries and commands originating from separate HA requests. A value of 0 ms disables only the intentional wait.
+- **Native effects:** Color cycle and Candle run in the lamp. Brightness changes preserve an active effect, while an unexpected stored-effect state while OFF is treated as a recovery condition: the sequencer clears it with the matching effect-stop command before planning the new request. Unknown effect state is tracked internally until confirmed. See the [protocol reference](docs/protocol.md) for mode tables and command details.
 - **Lamp state:** Bluetooth advertisements correct power, brightness, color mode and native effect state. These updates can pause while Home Assistant or the phone app holds a connection; idle disconnect alone does not make the lamp unavailable.
+
+## Technical documentation
+
+- [Command sequences](docs/command-sequences.md): command order, spacing and recovery rules.
+- [Known firmware behavior](docs/known-firmware-behavior.md): observed timing and state-reporting limitations.
+- [Protocol reference](docs/protocol.md): frames and advertisement formats.
 
 ## Troubleshooting
 
 ### The first command after a pause is slower
 
 After idle disconnect, a new BLE connection and authentication are needed.
-Another AwoX connection attempt can also delay the start. See the known
-Home Assistant advertisement-history issue near the top of this page.
+Another AwoX connection attempt can also delay the start.
 
 ### Long waits when a lamp is unreachable or powered off
 

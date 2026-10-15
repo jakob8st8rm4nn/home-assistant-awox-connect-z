@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.0] - 2026-10-16
+
+### Added
+
+- Add a dedicated command pipeline split into `command_sequences.py`, `command_manager.py` and `command_executor.py`. The planner defines symbolic command order, the manager owns pending targets/latest-wins state, request generations, retry eligibility and same-lamp spacing, and the executor performs late-selected writes through the BLE client.
+- Support combined Home Assistant targets such as color/CCT with brightness, effect with brightness, and the dedicated three-target sequences from the tested command table.
+- Add command-sequence and known-firmware-behavior documentation under `docs/`.
+- Add a configurable same-lamp minimum command interval (default 250 ms, range 0–2000 ms).
+- Carry per-request Home Assistant transition values through the new command pipeline for brightness, HS color and CCT.
+
+### Changed
+
+- Reduce `light.py` to the Home Assistant entity, advertisement reconciliation, request waiting and optimistic display updates; command planning and execution no longer live in the entity.
+- Remove lamp-command retries from `client.py`. Each client call now performs at most one physical GATT write and returns a structured success/failure/uncertain result. Retry eligibility and attempt limits are owned by `CommandManager`, so newer requests and command spacing can be honored between attempts.
+- Make `EFFECT STOP` planned commands carry the exact effect identity, allowing the executor to select the correct Candle or Color-cycle stop frame without reading mutable entity state.
+- Treat ambiguous write outcomes conservatively: mark planner state UNKNOWN and abort all pending requests with an error. A valid advertisement permits new requests; aborted work is never resumed.
+- Abort pending requests when an uninterpretable advertisement makes planner state UNKNOWN, while still processing the result of an already-started write.
+- Do not retry deterministic packet-construction errors; retain bounded retries for recoverable failures with confirmed non-delivery.
+- Keep advertisement decoding independent of command planning; convert decoded state to planner state in `light.py`.
+- Remove the former special 500 ms post-power-off guard in favor of the uniform configurable command interval defined by the new sequence specification.
+
+- Simplify command planning around the revised command-sequence specification: normalize Power OFF / brightness-zero requests first, reject contradictory Color+CCT or Start+Stop Effect requests, remove redundant Power ON appearance targets, and keep combined command ordering centralized in the sequencer.
+- Treat `OFF, stored effect` as an exceptional recovery state instead of a normal resume path. For a new valid request, the sequencer prefixes the matching `EFFECT STOP`, waits for confirmed success, then plans from normal OFF; expected `EFFECT START -> POWER ON` intermediate states do not trigger recovery.
+- Preserve active native effects during brightness-only changes instead of stopping and restarting them.
+- Reorder brightness/effect combinations so every successful `BRIGHTNESS_ON` is power-finalized before any later non-power command.
+
+### Fixed
+
+- Correct the minimum color temperature from 2200 K to 2700 K to match the supported lamp; use the same limit for Home Assistant capabilities, commands and displayed state.
+- Keep an in-flight request generation pending until its physical write result is known, so latest-wins replacement cannot complete the old request early; ambiguous or terminal failures now also fail that in-flight generation explicitly.
+
+### Reliability
+
+- Start a fresh availability-timeout grace period after a real regular idle disconnect. Retain source/RSSI and report Visible during that grace period even when no fresh advertisement is available; reloads do not create this grace period.
+
+- Separate startup availability grace from actual Bluetooth visibility. Expired cached advertisements no longer make a lamp visible after reload; fresh cached packets retain their original expiry.
+- Keep last-known advertisement source and RSSI during an active BLE connection, including advertisement pauses. After regular idle disconnect, retain these values through the post-disconnect grace period; otherwise require a fresh packet. Preserve historical Last Seen and Last Connection values.
+
+- Keep the write-attempt budget tied to the logical command and its target generation across advertisement-driven replanning.
+- Fix the options form default lookup and document the valid-advertisement requirement for command planning.
+
+- Preserve required tail power-on operations across advertisement-driven replanning.
+- Prevent successful older writes from consuming newer same-valued targets.
+- Preserve newer requests when aborting older preparation or definite-write failures; abort all pending work if the planner becomes UNKNOWN.
+- Re-check pending work after command spacing and again at the final post-authentication write boundary.
+
+- Add a manager-owned brightness-finalizer obligation. After every confirmed positive `BRIGHTNESS_ON`, the next physical lamp command must be Power ON or, if the latest accepted target requires OFF, Power OFF. Ordinary replanning and latest-wins replacement cannot remove this obligation.
+- Keep brightness request generations pending until the required power finalizer and any remaining requested steps complete. Cancellation, terminal failure, UNKNOWN and unload stop deferred finalization instead of recreating it later.
+- Keep finalizer retry budget tied to its originating brightness generation while allowing a newer OFF target to replace an unsent Power ON finalizer.
+- Preserve independent newer requests when an older brightness finalizer fails terminally.
+
+### Documentation
+
+- Restructure `docs/command-sequences.md` by request normalization, state/effect handling, stored-effect recovery, brightness finalization, execution and failure handling.
+- Expand `docs/known-firmware-behavior.md` and keep command-sequence documentation focused on intended integration behavior.
+
 ## [1.10.2] - 2026-10-09
 
 ### Changed

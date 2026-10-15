@@ -7,6 +7,8 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
@@ -42,7 +44,6 @@ from .const import (
     RUNTIME_CONNECT_QUEUE_LOG_THRESHOLD_SECONDS,
     RUNTIME_CONNECT_QUEUE_TIMEOUT_SECONDS,
     RUNTIME_CONNECT_TIMEOUT_SECONDS,
-    RUNTIME_WRITE_ATTEMPTS,
     RUNTIME_WRITE_TIMEOUT_SECONDS,
     SETUP_CONNECT_ATTEMPTS,
 )
@@ -63,8 +64,50 @@ class AwoxAuthenticationError(AwoxConnectZError):
     """Lamp rejected the local mesh credential."""
 
 
+class RuntimeCommandStatus(str, Enum):
+    """Outcome of one runtime command operation."""
+
+    NOT_SELECTED = "not_selected"
+    SUCCESS = "success"
+    PREPARATION_FAILED = "preparation_failed"
+    WRITE_FAILED = "write_failed"
+    WRITE_FAILED_FINAL = "write_failed_final"
+    WRITE_UNCERTAIN = "write_uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSelectedCommand:
+    """One late-selected encrypted-command source plus manager attempt number."""
+
+    frame: bytes
+    label: str
+    attempt: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeCommandResult:
+    """Structured result of one late-selected physical write attempt."""
+
+    status: RuntimeCommandStatus
+    label: str | None = None
+    error: AwoxConnectZError | None = None
+    write_finished_monotonic: float | None = None
+    attempt: int | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status is RuntimeCommandStatus.SUCCESS
+
+    @property
+    def write_was_selected(self) -> bool:
+        return self.status not in {
+            RuntimeCommandStatus.NOT_SELECTED,
+            RuntimeCommandStatus.PREPARATION_FAILED,
+        }
+
+
 class AwoxConnectZClient:
-    """Persistent-on-demand BLE session with retry and idle disconnect."""
+    """Persistent-on-demand BLE session, authentication and GATT transport."""
 
     def __init__(
         self,
@@ -136,7 +179,8 @@ class AwoxConnectZClient:
 
         self._available = True
         self._availability_started = time.monotonic()
-        self._last_liveness = self._availability_started
+        self._last_liveness: float | None = None
+        self._last_idle_disconnect: float | None = None
         self._availability_task: asyncio.Task[None] | None = None
         self._availability_wakeup = asyncio.Event()
         self._availability_listeners: set[Callable[[bool], None]] = set()
@@ -146,10 +190,10 @@ class AwoxConnectZClient:
         self._last_connection_observed = False
         self._last_seen_service_time: float | None = None
         self._last_seen_wallclock: datetime | None = None
+        self._last_diagnostic_service_info: bluetooth.BluetoothServiceInfoBleak | None = None
         # Availability starts with a grace period so the light entity does not
         # immediately flap unavailable after a reload. Diagnostics must not
         # mistake that grace period for confirmed Bluetooth visibility.
-        self._bluetooth_liveness_confirmed = False
 
     @callback
     def _record_error(
@@ -275,9 +319,12 @@ class AwoxConnectZClient:
 
     def _latest_service_info(self) -> bluetooth.BluetoothServiceInfoBleak | None:
         """Return Home Assistant's current best advertisement for this lamp."""
-        return bluetooth.async_last_service_info(
+        service_info = bluetooth.async_last_service_info(
             self.hass, self.mac, connectable=False
         )
+        if service_info is not None:
+            self._last_diagnostic_service_info = service_info
+        return service_info
 
     def bluetooth_source_name(self, source: str | None) -> str | None:
         """Resolve a Bluetooth source MAC/ID to the scanner's friendly name."""
@@ -294,9 +341,7 @@ class AwoxConnectZClient:
     @property
     def signal_strength(self) -> int | None:
         """Return RSSI from the current best Bluetooth advertisement."""
-        if not self.available:
-            return None
-        service_info = self._latest_service_info()
+        service_info = self._diagnostic_service_info()
         return None if service_info is None else int(service_info.rssi)
 
     @callback
@@ -322,7 +367,6 @@ class AwoxConnectZClient:
         service_info = self._latest_service_info()
         if service_info is None:
             return False
-        self._bluetooth_liveness_confirmed = True
         self._async_update_last_seen(float(service_info.time))
         return True
 
@@ -332,37 +376,65 @@ class AwoxConnectZClient:
         self._refresh_last_seen_from_ha()
         return self._last_seen_wallclock
 
+    def _in_disconnect_grace(self) -> bool:
+        """Retain diagnostics after a real idle disconnect until new evidence."""
+        disconnected_at = self._last_idle_disconnect
+        if disconnected_at is None:
+            return False
+        if (
+            self._last_seen_service_time is not None
+            and self._last_seen_service_time >= disconnected_at
+        ):
+            # A new packet takes over with its own original freshness deadline.
+            return False
+        return time.monotonic() - disconnected_at < self.availability_timeout
+
+    def _diagnostic_service_info(self) -> bluetooth.BluetoothServiceInfoBleak | None:
+        """Keep source/RSSI while connected or in post-disconnect grace.
+
+        A connection may suppress advertisements. Retained diagnostics are not a
+        new packet: they must never refresh Last Seen or Bluetooth visibility.
+        """
+        service_info = self._latest_service_info()
+        if service_info is not None:
+            self._async_update_last_seen(float(service_info.time))
+        if self.connected or self._in_disconnect_grace():
+            return service_info or self._last_diagnostic_service_info
+        if service_info is None:
+            return None
+        if time.monotonic() - float(service_info.time) >= self.availability_timeout:
+            return None
+        return service_info
+
     @property
     def bluetooth_status(self) -> str | None:
-        """Return the confirmed Bluetooth path state for diagnostics.
-
-        Availability deliberately starts with a grace period after setup/reload.
-        Until an advertisement or successful GATT connection confirms actual
-        Bluetooth liveness, reporting ``visible`` would be misleading. Home
-        Assistant renders ``None`` as Unknown for the enum sensor.
-        """
+        """Separate real visibility from startup/session availability grace."""
         if self.connected:
             return "connected"
 
-        if not self._bluetooth_liveness_confirmed:
-            # HA can learn an advertisement without dispatching our integration
-            # callback (for example when an identical packet is deduplicated).
-            # Treat an advertisement present in HA's Bluetooth history as real
-            # visibility evidence as well.
-            self._refresh_last_seen_from_ha()
+        latest = self._latest_liveness_time()
+        now = time.monotonic()
+        if (
+            self._last_seen_service_time is not None
+            and now - self._last_seen_service_time < self.availability_timeout
+        ):
+            return "visible"
 
-        if self.available:
-            if self._bluetooth_liveness_confirmed:
-                return "visible"
+        if self._in_disconnect_grace():
+            return "visible"
+
+        # Startup and connection evidence can keep the light available,
+        # but do not claim that an advertisement has actually been received.
+        if now - self._availability_started < self.availability_timeout:
+            return None
+        if latest is not None and now - latest < self.availability_timeout:
             return None
         return "unreachable"
 
     @property
     def current_bluetooth_source(self) -> str | None:
         """Return the scanner/proxy supplying HA's current best advertisement."""
-        if not self.available:
-            return None
-        service_info = self._latest_service_info()
+        service_info = self._diagnostic_service_info()
         if service_info is None:
             return None
         return self.bluetooth_source_name(str(service_info.source))
@@ -370,9 +442,7 @@ class AwoxConnectZClient:
     @property
     def current_bluetooth_source_id(self) -> str | None:
         """Return the raw source ID for HA's current best advertisement."""
-        if not self.available:
-            return None
-        service_info = self._latest_service_info()
+        service_info = self._diagnostic_service_info()
         if service_info is None:
             return None
         return str(service_info.source)
@@ -493,34 +563,32 @@ class AwoxConnectZClient:
     def async_note_bluetooth_liveness(self, seen_time: float | None = None) -> None:
         """Record a Bluetooth packet and make the lamp available immediately."""
         seen = seen_time if seen_time is not None else time.monotonic()
-        self._bluetooth_liveness_confirmed = True
-        self._last_liveness = max(self._last_liveness, seen)
+        self._last_liveness = (
+            seen if self._last_liveness is None else max(self._last_liveness, seen)
+        )
         self._async_update_last_seen(seen)
-        self._async_set_available(True)
+        if time.monotonic() - seen < self.availability_timeout:
+            self._async_set_available(True)
         self._availability_wakeup.set()
         self._async_notify_diagnostic_listeners()
 
     @callback
     def _async_note_connection_liveness(self) -> None:
         """Record a known-good local GATT session as a liveness signal."""
-        self._bluetooth_liveness_confirmed = True
         self._last_liveness = time.monotonic()
         self._async_set_available(True)
         self._availability_wakeup.set()
         self._async_notify_diagnostic_listeners()
 
-    def _latest_liveness_time(self) -> float:
-        """Return the newest packet/session liveness timestamp known to HA."""
-        latest = self._last_liveness
-        service_info = bluetooth.async_last_service_info(
-            self.hass, self.mac, connectable=False
-        )
-        if service_info is not None:
-            self._bluetooth_liveness_confirmed = True
-            seen_time = float(service_info.time)
-            self._async_update_last_seen(seen_time)
-            latest = max(latest, seen_time)
-        return latest
+    def _latest_liveness_time(self) -> float | None:
+        """Return actual packet/session evidence, never the startup timestamp."""
+        self._refresh_last_seen_from_ha()
+        times = [
+            timestamp
+            for timestamp in (self._last_liveness, self._last_seen_service_time)
+            if timestamp is not None
+        ]
+        return max(times) if times else None
 
     @callback
     def async_start_availability_tracking(self) -> None:
@@ -537,10 +605,11 @@ class AwoxConnectZClient:
                         self._async_set_available(True)
                         wait_seconds = self.availability_timeout
                     else:
-                        age = max(
-                            0.0,
-                            time.monotonic() - self._latest_liveness_time(),
-                        )
+                        latest = self._latest_liveness_time()
+                        availability_reference = self._availability_started
+                        if latest is not None:
+                            availability_reference = max(availability_reference, latest)
+                        age = max(0.0, time.monotonic() - availability_reference)
                         if age < self.availability_timeout:
                             self._async_set_available(True)
                             wait_seconds = max(
@@ -555,6 +624,20 @@ class AwoxConnectZClient:
                             # that timestamp briefly so unchanged packets restore
                             # availability as soon as practical.
                             wait_seconds = AVAILABILITY_RECOVERY_POLL_SECONDS
+
+                    # Publish visibility/source expiry even when availability
+                    # remains protected by startup or connection grace.
+                    self._refresh_last_seen_from_ha()
+                    if self._last_seen_service_time is not None:
+                        packet_remaining = (
+                            self._last_seen_service_time + self.availability_timeout
+                            - time.monotonic()
+                        )
+                        if packet_remaining > 0:
+                            wait_seconds = min(
+                                wait_seconds,
+                                max(AVAILABILITY_MIN_WAIT_SECONDS, packet_remaining),
+                            )
 
                     try:
                         await asyncio.wait_for(
@@ -983,6 +1066,7 @@ class AwoxConnectZClient:
             self._async_notify_diagnostic_listeners()
 
         if was_connected and mark_liveness:
+            self._last_idle_disconnect = time.monotonic()
             self._async_note_connection_liveness()
 
         # Per-packet callbacks deliver unchanged advertisements.
@@ -1036,25 +1120,32 @@ class AwoxConnectZClient:
                 finally:
                     await self._async_disconnect(cancel_idle=True)
 
-    async def async_send_selected(
+    async def async_send_selected_once(
         self,
-        selector: Callable[[], tuple[bytes, str] | None],
-    ) -> bool:
-        """Send one runtime command selected immediately before the GATT write.
+        selector: Callable[[], RuntimeSelectedCommand | None],
+    ) -> RuntimeCommandResult:
+        """Prepare a session, late-select, and attempt exactly one GATT write.
 
-        Waiting for the command semaphore, per-lamp command lock, runtime connect
-        gate, BLE connection, or authentication does not freeze a pending target.
-        The selector is called only after a usable authenticated session exists.
-        Once selected, that command remains fixed across the bounded write retry.
+        The selector is called only after connection and authentication.  There
+        is no lamp-command retry in this client method: retry eligibility,
+        spacing and newer-request handling belong to CommandManager/Executor.
+
+        Connection/authentication failures are reported as PREPARATION_FAILED
+        because no lamp command was selected.  Once ``write_gatt_char`` has been
+        entered, an exception is conservatively WRITE_UNCERTAIN because the
+        transport cannot prove whether the lamp processed the packet. Packet
+        construction errors are final: retrying identical input cannot fix them.
         """
         selected_label: str | None = None
+        selected_attempt: int | None = None
         command_started_monotonic = time.monotonic()
 
-        def _select() -> tuple[bytes, str] | None:
-            nonlocal selected_label
+        def _select() -> RuntimeSelectedCommand | None:
+            nonlocal selected_label, selected_attempt
             selected = selector()
             if selected is not None:
-                selected_label = selected[1]
+                selected_label = selected.label
+                selected_attempt = selected.attempt
             return selected
 
         async with self._command_semaphore:
@@ -1063,14 +1154,12 @@ class AwoxConnectZClient:
                     async with asyncio.timeout(
                         RUNTIME_COMMAND_TIMEOUT_SECONDS
                     ) as command_timeout:
-                        return await self._async_send_selected_locked(
+                        return await self._async_send_selected_once_locked(
                             _select,
                             runtime_command_timeout=command_timeout,
                             command_started_monotonic=command_started_monotonic,
                         )
                 except asyncio.CancelledError:
-                    # Keep the integration slot and per-lamp lock until cleanup
-                    # has been attempted, then propagate the external cancel.
                     await self._async_disconnect(cancel_idle=True)
                     raise
                 except TimeoutError as err:
@@ -1081,150 +1170,213 @@ class AwoxConnectZClient:
                             f"{RUNTIME_COMMAND_TIMEOUT_SECONDS:.1f}s runtime budget"
                         )
                         stage = "command_preparation"
+                        status = RuntimeCommandStatus.PREPARATION_FAILED
                     else:
                         message = (
                             f"Command '{selected_label}' exceeded the "
                             f"{RUNTIME_COMMAND_TIMEOUT_SECONDS:.1f}s runtime budget"
                         )
                         stage = "command_runtime"
+                        status = RuntimeCommandStatus.WRITE_UNCERTAIN
+                    error = AwoxConnectZError(message)
+                    error.__cause__ = err
                     self._record_error(
-                        message,
+                        error,
                         category="timeout",
                         stage=stage,
                         command_label=selected_label,
+                        write_attempt=selected_attempt,
                     )
-                    raise AwoxConnectZError(message) from err
+                    return RuntimeCommandResult(
+                        status=status,
+                        label=selected_label,
+                        error=error,
+                        write_finished_monotonic=(
+                            time.monotonic()
+                            if status is RuntimeCommandStatus.WRITE_UNCERTAIN
+                            else None
+                        ),
+                        attempt=selected_attempt,
+                    )
 
-    async def _async_send_selected_locked(
+    async def _async_send_selected_once_locked(
         self,
-        selector: Callable[[], tuple[bytes, str] | None],
+        selector: Callable[[], RuntimeSelectedCommand | None],
         *,
         runtime_command_timeout: asyncio.Timeout,
         command_started_monotonic: float,
-    ) -> bool:
-        """Run one late-selected command while runtime locks are already held."""
+    ) -> RuntimeCommandResult:
+        """Run one late-selected physical write while runtime locks are held."""
         try:
             await self._async_ensure_connected(
                 fast_runtime=True,
                 runtime_command_timeout=runtime_command_timeout,
             )
+        except asyncio.CancelledError:
+            raise
         except AwoxDeviceNotFound as err:
             self._record_error(
                 err, category="device_not_found", stage="device_lookup"
             )
-            raise AwoxConnectZError(
+            error = AwoxConnectZError(
                 f"AwoX command preparation failed during device lookup: {err}"
-            ) from err
+            )
+            error.__cause__ = err
+            await self._async_disconnect(cancel_idle=True)
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.PREPARATION_FAILED,
+                error=error,
+            )
         except AwoxAuthenticationError as err:
             self._record_error(
                 err, category="authentication", stage="authentication"
             )
-            raise AwoxConnectZError(
+            error = AwoxConnectZError(
                 f"AwoX command preparation failed during authentication: {err}"
-            ) from err
-        except asyncio.CancelledError:
-            raise
+            )
+            error.__cause__ = err
+            await self._async_disconnect(cancel_idle=True)
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.PREPARATION_FAILED,
+                error=error,
+            )
         except Exception as err:
             self._record_error(
                 err,
                 category=self._error_category(err, "connection"),
                 stage="connect",
             )
-            raise AwoxConnectZError(
+            error = AwoxConnectZError(
                 f"AwoX command preparation failed during BLE connect: {err}"
-            ) from err
+            )
+            error.__cause__ = err
+            await self._async_disconnect(cancel_idle=True)
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.PREPARATION_FAILED,
+                error=error,
+            )
 
-        # This is the write boundary for same-lamp coalescing. The entity may
-        # replace waiting requests right up to this synchronous callback. No
-        # await occurs between selection and construction of the first packet.
-        selected = selector()
+        # Final late-selection boundary. No await occurs between selection and
+        # the checks/encryption that precede the physical GATT call.
+        try:
+            selected = selector()
+        except Exception:
+            # Frame construction can fail before selection. Keep the prepared
+            # session subject to normal idle cleanup even without a write.
+            self._schedule_idle_disconnect()
+            raise
         if selected is None:
             self._clear_current_error()
             self._schedule_idle_disconnect()
-            return False
+            return RuntimeCommandResult(RuntimeCommandStatus.NOT_SELECTED)
 
-        plain16, label = selected
-        last_exception: Exception | None = None
+        plain16 = selected.frame
+        label = selected.label
+        attempt = max(1, int(selected.attempt))
 
-        for attempt in range(1, RUNTIME_WRITE_ATTEMPTS + 1):
-            try:
-                if self._client is None or self._session_key is None:
-                    raise AwoxConnectZError(
-                        "AwoX session was not created"
-                    )
-
-                packet = encrypt_command(self._session_key, plain16)
-                async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT_SECONDS):
-                    await self._client.write_gatt_char(
-                        COMMAND_CHAR_UUID, packet, response=True
-                    )
-
-                self._record_command_success(
-                    label,
-                    started_monotonic=command_started_monotonic,
-                    attempts=attempt,
-                )
-                self._async_note_connection_liveness()
-                self._schedule_idle_disconnect()
-                return True
-            except asyncio.CancelledError:
-                raise
-            except TimeoutError as err:
-                last_exception = AwoxConnectZError(
-                    f"GATT write timed out after "
-                    f"{RUNTIME_WRITE_TIMEOUT_SECONDS:.1f}s"
-                )
-                last_exception.__cause__ = err
-            except Exception as err:
-                last_exception = err
-
+        if self._client is None or self._session_key is None:
+            error = AwoxConnectZError("AwoX session was not created")
             self._record_error(
-                last_exception,
-                category=self._error_category(last_exception, "write"),
+                error,
+                category="write",
+                stage="gatt_write_preparation",
+                command_label=label,
+                write_attempt=attempt,
+            )
+            await self._async_disconnect(cancel_idle=True)
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.WRITE_FAILED,
+                label=label,
+                error=error,
+                write_finished_monotonic=time.monotonic(),
+                attempt=attempt,
+            )
+
+        try:
+            packet = encrypt_command(self._session_key, plain16)
+        except Exception as err:
+            error = AwoxConnectZError(
+                f"Command '{label}' packet construction failed: {err}"
+            )
+            error.__cause__ = err
+            self._record_error(
+                error,
+                category="protocol",
+                stage="command_encryption",
+                command_label=label,
+                write_attempt=attempt,
+            )
+            self._schedule_idle_disconnect()
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.WRITE_FAILED_FINAL,
+                label=label,
+                error=error,
+                write_finished_monotonic=time.monotonic(),
+                attempt=attempt,
+            )
+
+        try:
+            async with asyncio.timeout(RUNTIME_WRITE_TIMEOUT_SECONDS):
+                await self._client.write_gatt_char(
+                    COMMAND_CHAR_UUID, packet, response=True
+                )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError as err:
+            write_finished = time.monotonic()
+            error = AwoxConnectZError(
+                f"GATT write timed out after {RUNTIME_WRITE_TIMEOUT_SECONDS:.1f}s"
+            )
+            error.__cause__ = err
+            self._record_error(
+                error,
+                category="timeout",
                 stage="gatt_write",
                 command_label=label,
                 write_attempt=attempt,
             )
-            _LOGGER.debug(
-                "AwoX command write %s failed on attempt %s/%s: %s",
-                label,
-                attempt,
-                RUNTIME_WRITE_ATTEMPTS,
-                last_exception,
+            await self._async_disconnect(cancel_idle=True)
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.WRITE_UNCERTAIN,
+                label=label,
+                error=error,
+                write_finished_monotonic=write_finished,
+                attempt=attempt,
+            )
+        except Exception as err:
+            write_finished = time.monotonic()
+            error = AwoxConnectZError(f"Command '{label}' write failed: {err}")
+            error.__cause__ = err
+            self._record_error(
+                error,
+                category=self._error_category(err, "write"),
+                stage="gatt_write",
+                command_label=label,
+                write_attempt=attempt,
             )
             await self._async_disconnect(cancel_idle=True)
+            return RuntimeCommandResult(
+                RuntimeCommandStatus.WRITE_UNCERTAIN,
+                label=label,
+                error=error,
+                write_finished_monotonic=write_finished,
+                attempt=attempt,
+            )
 
-            if attempt >= RUNTIME_WRITE_ATTEMPTS:
-                break
-
-            # The selected command is now genuinely in flight and remains fixed
-            # across the one allowed reconnect/write retry. The recovery connect
-            # still uses the shared runtime connection gate.
-            try:
-                await self._async_ensure_connected(
-                    fast_runtime=True,
-                    runtime_command_timeout=runtime_command_timeout,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as reconnect_err:
-                self._record_error(
-                    reconnect_err,
-                    category=self._error_category(reconnect_err, "connection"),
-                    stage="retry_connect",
-                    command_label=label,
-                    write_attempt=attempt,
-                )
-                raise AwoxConnectZError(
-                    f"Command '{label}' write failed; "
-                    f"reconnect failed: {reconnect_err}"
-                ) from reconnect_err
-
-        raise AwoxConnectZError(
-            f"Command '{label}' failed after "
-            f"{RUNTIME_WRITE_ATTEMPTS} write attempt(s): "
-            f"{last_exception}"
-        ) from last_exception
+        write_finished = time.monotonic()
+        self._record_command_success(
+            label,
+            started_monotonic=command_started_monotonic,
+            attempts=attempt,
+        )
+        self._async_note_connection_liveness()
+        self._schedule_idle_disconnect()
+        return RuntimeCommandResult(
+            RuntimeCommandStatus.SUCCESS,
+            label=label,
+            write_finished_monotonic=write_finished,
+            attempt=attempt,
+        )
 
     async def async_close(self) -> None:
         """Stop timers and release the BLE connection."""

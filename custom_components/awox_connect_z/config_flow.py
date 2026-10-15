@@ -51,6 +51,7 @@ from .const import (
     AWOX_COMPANY_ID,
     ADDITIONAL_DISCOVERY_TIMEOUT_SECONDS,
     CONF_AVAILABILITY_TIMEOUT,
+    CONF_COMMAND_INTERVAL_MS,
     CONF_DEFAULT_TRANSITION,
     CONF_DEVICES,
     CONF_EMAIL,
@@ -63,6 +64,7 @@ from .const import (
     CONF_OWNER_ID,
     CONF_SETUP_METHOD,
     DEFAULT_AVAILABILITY_TIMEOUT,
+    DEFAULT_COMMAND_INTERVAL_MS,
     LOCAL_DISCOVERY_SCAN_SECONDS,
     LOCAL_VERIFICATION_CONCURRENCY,
     LOCAL_VERIFICATION_TIMEOUT_SECONDS,
@@ -70,11 +72,13 @@ from .const import (
     DEFAULT_MAX_CONCURRENT_COMMANDS,
     DEFAULT_TRANSITION,
     MAX_AVAILABILITY_TIMEOUT,
+    MAX_COMMAND_INTERVAL_MS,
     MAX_IDLE_DISCONNECT,
     MAX_TRANSITION,
     MAX_CONCURRENT_COMMANDS,
     MESH_CREDENTIAL_MAX_BYTES,
     MIN_AVAILABILITY_TIMEOUT,
+    MIN_COMMAND_INTERVAL_MS,
     MIN_IDLE_DISCONNECT,
     MIN_TRANSITION,
     MIN_CONCURRENT_COMMANDS,
@@ -1810,6 +1814,20 @@ class AwoxConnectZOptionsFlow(OptionsFlowWithReload):
                         min=MIN_AVAILABILITY_TIMEOUT,
                         max=MAX_AVAILABILITY_TIMEOUT,
                         step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_COMMAND_INTERVAL_MS,
+                    default=options.get(
+                        CONF_COMMAND_INTERVAL_MS,
+                        DEFAULT_COMMAND_INTERVAL_MS,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_COMMAND_INTERVAL_MS,
+                        max=MAX_COMMAND_INTERVAL_MS,
+                        step=10,
                         mode=NumberSelectorMode.BOX,
                     )
                 ),

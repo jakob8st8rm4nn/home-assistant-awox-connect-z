@@ -164,13 +164,15 @@
         "title": "AwoX Connect.Z Optionen",
         "data": {
           "default_transition": "Standard-Übergang in Sekunden",
+          "command_interval_ms": "Mindestabstand zwischen Befehlen (ms)",
           "idle_disconnect": "BLE nach Leerlauf trennen (Sekunden)",
           "max_concurrent_commands": "Maximal gleichzeitige Lampenbefehle",
           "availability_timeout": "Nicht verfügbar nach (Sekunden)"
         },
         "data_description": {
           "max_concurrent_commands": "Maximale Anzahl an AwoX-Lampenbefehlen, die für diesen Mesh-Eintrag gleichzeitig laufen dürfen (1-32). Neue Runtime-BLE-Verbindungsaufbauten werden separat koordiniert, damit wartende Verbindungen nicht ihr eigenes Connect-Zeitlimit verbrauchen.",
-          "availability_timeout": "Zeit ohne Bluetooth-Lebenszeichen oder funktionierende HA-Verbindung, nach der eine Lampe als nicht verfügbar gilt (10–300 Sekunden)."
+          "availability_timeout": "Zeit ohne Bluetooth-Lebenszeichen oder funktionierende HA-Verbindung, nach der eine Lampe als nicht verfügbar gilt (10–300 Sekunden).",
+          "command_interval_ms": "Mindestzeit zwischen aufeinanderfolgenden GATT-Schreibvorgängen an dieselbe Lampe (0–2000 ms). 0 deaktiviert den absichtlichen Abstand."
         }
       }
     }

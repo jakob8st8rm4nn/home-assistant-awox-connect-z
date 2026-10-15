@@ -21,6 +21,7 @@ CONF_DEFAULT_TRANSITION = "default_transition"
 CONF_IDLE_DISCONNECT = "idle_disconnect"
 CONF_MAX_CONCURRENT_COMMANDS = "max_concurrent_commands"
 CONF_AVAILABILITY_TIMEOUT = "availability_timeout"
+CONF_COMMAND_INTERVAL_MS = "command_interval_ms"
 
 DEFAULT_NAME = "AwoX Connect.Z"
 
@@ -51,6 +52,10 @@ DEFAULT_AVAILABILITY_TIMEOUT = 30.0
 MIN_AVAILABILITY_TIMEOUT = 10.0
 MAX_AVAILABILITY_TIMEOUT = 300.0
 
+DEFAULT_COMMAND_INTERVAL_MS = 250
+MIN_COMMAND_INTERVAL_MS = 0
+MAX_COMMAND_INTERVAL_MS = 2000
+
 
 # -----------------------------------------------------------------------------
 # Setup and device discovery
@@ -78,13 +83,15 @@ SETUP_CONNECT_ATTEMPTS = 4
 DISCOVERY_RETRY_BASE_DELAY_SECONDS = 1.5
 DISCOVERY_RETRY_MAX_DELAY_SECONDS = 4.0
 
-# Runtime command budget and technical retry limits.
+# Manager-owned maximum attempts for one logical command and target generation.
+MAX_COMMAND_WRITE_ATTEMPTS = 2
+
+# Runtime command and physical-write time budgets.
 RUNTIME_COMMAND_TIMEOUT_SECONDS = 30.0
 RUNTIME_CONNECT_TIMEOUT_SECONDS = 12.0
 RUNTIME_CONNECT_QUEUE_TIMEOUT_SECONDS = 30.0
 RUNTIME_AUTH_TIMEOUT_SECONDS = 4.0
 RUNTIME_WRITE_TIMEOUT_SECONDS = 4.0
-RUNTIME_WRITE_ATTEMPTS = 2
 
 # Protected disconnect cleanup limit.
 DISCONNECT_TIMEOUT_SECONDS = 12.0
@@ -92,15 +99,6 @@ DISCONNECT_TIMEOUT_SECONDS = 12.0
 AUTH_RESPONSE_SETTLE_SECONDS = 0.05
 # Only log shared runtime-connect queue waits at or above this duration.
 RUNTIME_CONNECT_QUEUE_LOG_THRESHOLD_SECONDS = 0.05
-
-
-# -----------------------------------------------------------------------------
-# Command processing and hardware guards
-# -----------------------------------------------------------------------------
-# Hardware settling guard after a successfully written power-off command.
-# Applies only after a power-off write succeeds and only to a subsequent
-# command that can turn the lamp back on; it is not a general command delay.
-POWER_OFF_SETTLE_SECONDS = 0.5
 
 
 # -----------------------------------------------------------------------------
@@ -131,7 +129,7 @@ MESH_CREDENTIAL_MAX_BYTES = 16
 # -----------------------------------------------------------------------------
 # Light capabilities
 # -----------------------------------------------------------------------------
-MIN_COLOR_TEMP_KELVIN = 2200
+MIN_COLOR_TEMP_KELVIN = 2700
 MAX_COLOR_TEMP_KELVIN = 6500
 
 # Native lamp-side effects confirmed on EGLO-ZM-RGB-TW firmware 3.0.2.

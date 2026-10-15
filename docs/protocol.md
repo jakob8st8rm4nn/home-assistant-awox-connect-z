@@ -1,6 +1,6 @@
 # Connect.Z protocol reference
 
-This reference describes the behavior implemented in v1.10.0 and reported in
+This reference describes the behavior implemented in v1.11.0 and reported in
 hardware testing with EGLO `900024/12253`, model `EGLO-ZM-RGB-TW`, firmware
 `3.0.2`, hardware `4.62`. It is not a specification for every AwoX device.
 
@@ -8,7 +8,9 @@ hardware testing with EGLO `900024/12253`, model `EGLO-ZM-RGB-TW`, firmware
 
 The mode is byte 11 of the manufacturer payload after removal of the company ID
 (`0x0160`). Values below are hexadecimal. Power and the underlying color mode
-are separate from the native effect: an off lamp can remember an effect.
+are separate from the native effect: lamp firmware can leave an effect remembered
+while power is off. The integration decodes that state but treats it as an
+exceptional recovery condition rather than a normal resume shortcut.
 
 | Mode | Power | Underlying appearance | Effect |
 |---|---|---|---|
@@ -82,22 +84,13 @@ Control command above. The two stop commands are not interchangeable.
 The existing authenticated transport encrypts the 16-byte frame before writing
 it. CRCs are calculated per frame and destination, not copied from examples.
 
-## Effect lifecycle and command ordering
+## Command sequencing
 
-| Request or event | Handling |
-|---|---|
-| Effect requested while off | Prepare the effect first, then turn on. A queued brightness command can supply the turn-on step. |
-| Effect prepared while off | The effect command alone does not turn on the LEDs; ordinary power-on resumes the remembered effect. |
-| Switch effect or select static color/temperature | Stop the previous effect with its matching command, then re-evaluate the newest target. |
-| Power off | Send power-off directly. On the tested hardware it clears the effect; update the optimistic state only after a successful write. |
-| Rapid off → on | Retain the existing 500 ms guard after a successfully written off. |
-| Effect state unknown | Track possible effects and stop conflicting possibilities as needed before completing a target. |
-| Ambiguous effect-changing write failure | Preserve uncertainty even if an advertisement arrived between retries. A later advertisement can confirm the state. |
-
-Color, color temperature and effects share one latest-wins target; brightness
-remains independent. Each next packet is selected when the connection is ready.
-A superseding request can therefore replace a target between preparation and
-power-on. Already-started writes retain the existing bounded retry handling.
+Command order, request normalization, stored-effect recovery, brightness
+finalization, latest-request behavior, minimum spacing and error recovery are
+defined in [Command sequences](command-sequences.md).
+See [Known firmware behavior](known-firmware-behavior.md) for observed timing
+and state-reporting limitations.
 
 The effects run inside the lamp: there is no Home Assistant animation loop or
 continuous stream of color commands. Effect state is optimistic after successful
