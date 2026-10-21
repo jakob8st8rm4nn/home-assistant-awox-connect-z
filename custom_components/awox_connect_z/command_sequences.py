@@ -244,12 +244,11 @@ def _plan_normal(
             brightness,
             _cmd(CommandKind.POWER_ON),
             effect_start,
+            _cmd(CommandKind.POWER_ON),
         )
 
     # Color/CCT + Start Effect.
     if appearance is not None and effect_start is not None:
-        if state.is_on:
-            return (appearance, effect_start)
         return (appearance, effect_start, _cmd(CommandKind.POWER_ON))
 
     # Color/CCT + Brightness.
@@ -271,7 +270,12 @@ def _plan_normal(
     if brightness is not None and effect_start is not None:
         if state.is_on and state.effect == target.effect:
             return (brightness, _cmd(CommandKind.POWER_ON))
-        return (brightness, _cmd(CommandKind.POWER_ON), effect_start)
+        return (
+            brightness,
+            _cmd(CommandKind.POWER_ON),
+            effect_start,
+            _cmd(CommandKind.POWER_ON),
+        )
 
     if appearance is not None:
         if state.is_on:
@@ -282,7 +286,7 @@ def _plan_normal(
         if state.is_on:
             if state.effect == target.effect:
                 return ()
-            return (effect_start,)
+            return (effect_start, _cmd(CommandKind.POWER_ON))
         return (effect_start, _cmd(CommandKind.POWER_ON))
 
     if brightness is not None:
@@ -320,7 +324,8 @@ def plan_commands(
     planned power-on rather than trigger recovery.
 
     No delay commands are returned. The manager enforces spacing and owns the
-    brightness-finalizer obligation after a successful ``BRIGHTNESS_ON``.
+    power-finalizer obligation after a successful ``BRIGHTNESS_ON`` or
+    ``EFFECT_START``.
     """
 
     _validate_state(state)

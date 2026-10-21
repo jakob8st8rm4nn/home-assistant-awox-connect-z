@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.1] - 2026-10-21
+
+### Fixed
+
+- Require a power command after every actual Candle or Color Cycle start, including starts while the lamp is already assumed ON. Preserve the existing power step after brightness in combined brightness/effect requests.
+- Extend the manager-owned power-finalizer obligation to effect starts so ordinary replanning, latest-wins replacement and advertisements cannot skip it. Honor a newer OFF target, retain generation-aware retry and cancellation handling, and do not add a finalizer for effect-stop or same-effect no-op requests.
+
+### Documentation
+
+- Update the command-sequence table and finalization rules. Document the observed Candle physical-off/reporting-ON behavior and the tested Power ON countermeasure without claiming complete prevention or the same demonstrated physical failure for Color Cycle.
+
 ## [1.11.0] - 2026-10-16
 
 ### Added
@@ -22,7 +33,6 @@ All notable changes to this project will be documented in this file.
 - Do not retry deterministic packet-construction errors; retain bounded retries for recoverable failures with confirmed non-delivery.
 - Keep advertisement decoding independent of command planning; convert decoded state to planner state in `light.py`.
 - Remove the former special 500 ms post-power-off guard in favor of the uniform configurable command interval defined by the new sequence specification.
-
 - Simplify command planning around the revised command-sequence specification: normalize Power OFF / brightness-zero requests first, reject contradictory Color+CCT or Start+Stop Effect requests, remove redundant Power ON appearance targets, and keep combined command ordering centralized in the sequencer.
 - Treat `OFF, stored effect` as an exceptional recovery state instead of a normal resume path. For a new valid request, the sequencer prefixes the matching `EFFECT STOP`, waits for confirmed success, then plans from normal OFF; expected `EFFECT START -> POWER ON` intermediate states do not trigger recovery.
 - Preserve active native effects during brightness-only changes instead of stopping and restarting them.
@@ -36,18 +46,14 @@ All notable changes to this project will be documented in this file.
 ### Reliability
 
 - Start a fresh availability-timeout grace period after a real regular idle disconnect. Retain source/RSSI and report Visible during that grace period even when no fresh advertisement is available; reloads do not create this grace period.
-
 - Separate startup availability grace from actual Bluetooth visibility. Expired cached advertisements no longer make a lamp visible after reload; fresh cached packets retain their original expiry.
 - Keep last-known advertisement source and RSSI during an active BLE connection, including advertisement pauses. After regular idle disconnect, retain these values through the post-disconnect grace period; otherwise require a fresh packet. Preserve historical Last Seen and Last Connection values.
-
 - Keep the write-attempt budget tied to the logical command and its target generation across advertisement-driven replanning.
 - Fix the options form default lookup and document the valid-advertisement requirement for command planning.
-
 - Preserve required tail power-on operations across advertisement-driven replanning.
 - Prevent successful older writes from consuming newer same-valued targets.
 - Preserve newer requests when aborting older preparation or definite-write failures; abort all pending work if the planner becomes UNKNOWN.
 - Re-check pending work after command spacing and again at the final post-authentication write boundary.
-
 - Add a manager-owned brightness-finalizer obligation. After every confirmed positive `BRIGHTNESS_ON`, the next physical lamp command must be Power ON or, if the latest accepted target requires OFF, Power OFF. Ordinary replanning and latest-wins replacement cannot remove this obligation.
 - Keep brightness request generations pending until the required power finalizer and any remaining requested steps complete. Cancellation, terminal failure, UNKNOWN and unload stop deferred finalization instead of recreating it later.
 - Keep finalizer retry budget tied to its originating brightness generation while allowing a newer OFF target to replace an unsent Power ON finalizer.

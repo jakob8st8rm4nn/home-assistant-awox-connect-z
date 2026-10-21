@@ -1,7 +1,7 @@
 """Pending-target and command-execution manager for AwoX / EGLO Connect.Z.
 
 The manager owns latest-wins pending intent, per-lamp write spacing, retries,
-request generations and the manager-level brightness-finalizer obligation. The
+request generations and the manager-level power-finalizer obligation. The
 pure sequencer decides semantic command order and stored-effect recovery.
 """
 
@@ -130,8 +130,8 @@ class CommandManager:
         self._write_attempts: dict[tuple[object, int], int] = {}
 
         # Manager-owned obligation created only by a confirmed successful
-        # BRIGHTNESS_ON. While present, no non-power command may be selected.
-        self._brightness_finalizer_generation: int | None = None
+        # BRIGHTNESS_ON or EFFECT_START. No non-power command may intervene.
+        self._power_finalizer_generation: int | None = None
 
         # EFFECT START while OFF intentionally creates OFF+stored until its
         # already-planned POWER ON tail. Only that same uninterrupted sequence
@@ -140,7 +140,7 @@ class CommandManager:
         self._expected_stored_effect: str | None = None
 
         # Explicit cancellation/abort must prevent a successful already-in-flight
-        # BRIGHTNESS_ON from recreating automatic finalization afterwards.
+        # BRIGHTNESS_ON / EFFECT_START from recreating finalization afterwards.
         self._suppress_followups: set[int] = set()
 
         self._replan()
@@ -188,7 +188,7 @@ class CommandManager:
                 self._pending_versions.brightness,
                 self._pending_versions.appearance,
                 self._pending_versions.effect,
-                self._brightness_finalizer_generation,
+                self._power_finalizer_generation,
                 # A request whose logical command is already being written is
                 # still unfinished even if a newer request has replaced all of
                 # its pending target slots. Keep its waiter alive until the
@@ -248,7 +248,7 @@ class CommandManager:
                 self._suppress_followups.add(self._in_flight_generation)
 
         self._clear_pending_targets()
-        self._brightness_finalizer_generation = None
+        self._power_finalizer_generation = None
         self._clear_expected_stored_intermediate()
         self._planned.clear()
         self._planned_is_finalizer = False
@@ -267,8 +267,8 @@ class CommandManager:
 
         if self._expected_stored_effect_generation == generation:
             self._clear_expected_stored_intermediate()
-        if self._brightness_finalizer_generation == generation:
-            self._brightness_finalizer_generation = None
+        if self._power_finalizer_generation == generation:
+            self._power_finalizer_generation = None
 
         if self._in_flight is None:
             self._prune_suppressed_followups()
@@ -409,7 +409,7 @@ class CommandManager:
         generation = self._command_generation(command, is_finalizer=is_finalizer)
 
         attempt_identity: object = (
-            "brightness_finalizer" if is_finalizer else command
+            "power_finalizer" if is_finalizer else command
         )
         key = (attempt_identity, generation)
 
@@ -451,16 +451,16 @@ class CommandManager:
             cutoff,
         )
 
-        # A successful BRIGHTNESS_ON creates the physical power-finalizer
+        # Successful brightness and effect-start writes create the power-finalizer
         # obligation unless this generation was explicitly cancelled/aborted.
-        if command.kind is CommandKind.BRIGHTNESS_ON:
+        if command.kind in {CommandKind.BRIGHTNESS_ON, CommandKind.EFFECT_START}:
             if generation not in self._suppress_followups:
-                self._brightness_finalizer_generation = generation
+                self._power_finalizer_generation = generation
 
         # A manager-selected power finalizer closes the obligation only after
         # the write itself succeeds.
-        if is_finalizer and self._brightness_finalizer_generation == generation:
-            self._brightness_finalizer_generation = None
+        if is_finalizer and self._power_finalizer_generation == generation:
+            self._power_finalizer_generation = None
 
         # Preserve the intended EFFECT START -> POWER ON intermediate only for
         # the exact uninterrupted generation that still owns the ON tail.
@@ -516,7 +516,7 @@ class CommandManager:
             # completed merely because a newer request superseded its targets.
             failed = frozenset((*self.pending_generations, generation))
             self._suppress_followups.update(failed)
-            self._brightness_finalizer_generation = None
+            self._power_finalizer_generation = None
             self._clear_expected_stored_intermediate()
             self._clear_pending_targets()
             self._planned.clear()
@@ -529,7 +529,7 @@ class CommandManager:
                 failed,
             )
 
-        # A terminal finalizer failure belongs to its originating brightness
+        # A terminal finalizer failure belongs to its originating command
         # generation, not to independent newer requests accepted meanwhile.
         failure_cutoff = generation if is_finalizer else cutoff
 
@@ -560,7 +560,7 @@ class CommandManager:
             self._replan()
             return WriteFailureResult(WriteFailureAction.REPLAN)
 
-        # Retry the same semantic step. For a brightness finalizer, replanning
+        # Retry the same semantic step. For a power finalizer, replanning
         # is preferable because the latest target may have changed ON -> OFF.
         if is_finalizer:
             self._replan()
@@ -598,7 +598,7 @@ class CommandManager:
         is_finalizer: bool,
     ) -> int:
         if is_finalizer:
-            generation = self._brightness_finalizer_generation
+            generation = self._power_finalizer_generation
             assert generation is not None
             return generation
 
@@ -638,7 +638,7 @@ class CommandManager:
         Pending-only generations cannot create automatic follow-up work once
         their intent has been removed. The only generation that still needs
         suppression is therefore the currently in-flight write, whose eventual
-        success could otherwise recreate a brightness finalizer or expected
+        success could otherwise recreate a power finalizer or expected
         stored-effect continuation after cancellation.
         """
         if self._in_flight_generation is None:
@@ -669,7 +669,7 @@ class CommandManager:
 
         # The finalizer is a physical invariant, not an ordinary pending slot.
         # It always blocks every non-power command until a power write succeeds.
-        if self._brightness_finalizer_generation is not None:
+        if self._power_finalizer_generation is not None:
             kind = (
                 CommandKind.POWER_OFF
                 if self._pending.power is False
@@ -693,7 +693,7 @@ class CommandManager:
         )
 
         # A normalized no-op completes immediately. This is safe only after the
-        # finalizer check above; an outstanding brightness request cannot vanish
+        # finalizer check above; an outstanding brightness/effect request cannot vanish
         # merely because state already matches its power target.
         if not planned:
             self._clear_pending_targets()
@@ -842,7 +842,7 @@ class CommandManager:
                 self._pending_versions.brightness,
                 self._pending_versions.appearance,
                 self._pending_versions.effect,
-                self._brightness_finalizer_generation,
+                self._power_finalizer_generation,
             )
             if version is not None and version <= cutoff
         }
@@ -903,10 +903,10 @@ class CommandManager:
             self._remove_generation(generation)
 
         if (
-            self._brightness_finalizer_generation is not None
-            and self._brightness_finalizer_generation <= cutoff
+            self._power_finalizer_generation is not None
+            and self._power_finalizer_generation <= cutoff
         ):
-            self._brightness_finalizer_generation = None
+            self._power_finalizer_generation = None
 
         if (
             self._expected_stored_effect_generation is not None
