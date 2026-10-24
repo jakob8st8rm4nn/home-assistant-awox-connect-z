@@ -8,6 +8,7 @@ service=zigbee mesh credential and lamp metadata needed for local BLE control.
 from __future__ import annotations
 
 import asyncio
+from aiohttp import ClientError
 from dataclasses import dataclass
 import re
 import uuid
@@ -15,6 +16,8 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .protocol import is_valid_device_mesh_id
 
 from .const import (
     CLOUD_REQUEST_TIMEOUT_SECONDS,
@@ -72,15 +75,15 @@ async def _post_json(
     payload: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
     session = async_get_clientsession(hass)
-    async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SECONDS):
-        async with session.post(url, headers=headers, json=payload) as response:
-            try:
+    try:
+        async with asyncio.timeout(CLOUD_REQUEST_TIMEOUT_SECONDS):
+            async with session.post(url, headers=headers, json=payload) as response:
                 data = await response.json(content_type=None)
-            except Exception as err:
-                raise AwoxCloudError(
-                    f"Invalid AwoX cloud response: {err}"
-                ) from err
-            return response.status, data
+                if not isinstance(data, dict):
+                    raise AwoxCloudError("Invalid AwoX cloud response object")
+                return response.status, data
+    except (ClientError, TimeoutError, ValueError) as err:
+        raise AwoxCloudError("AwoX cloud request failed") from err
 
 
 def normalize_mac(value: str) -> str:
@@ -190,6 +193,9 @@ def _convert_devices(
         except (TypeError, ValueError):
             continue
 
+        if not is_valid_device_mesh_id(mesh_id):
+            continue
+
         if mac in seen:
             continue
         seen.add(mac)
@@ -276,7 +282,10 @@ async def _fetch_class(
         raise AwoxCloudError(
             str(data.get("error") or f"HTTP {status}")
         )
-    return list(data.get("results", []))
+    rows = data.get("results")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise AwoxCloudError("Invalid AwoX cloud results")
+    return rows
 
 
 def _merge_rows(
@@ -311,6 +320,7 @@ async def async_import_account(
     user: dict[str, Any] | None = None
     base_url: str | None = None
     last_error = "unknown"
+    invalid_auth = False
 
     for candidate_url in PARSE_URLS:
         try:
@@ -337,18 +347,15 @@ async def async_import_account(
             base_url = candidate_url
             break
 
-        last_error = str(
-            data.get("error") or f"HTTP {status}"
+        last_error = str(data.get("error") or f"HTTP {status}")
+        invalid_auth |= data.get("code") == 101 or any(
+            word in last_error.lower() for word in ("invalid", "password", "credential")
         )
 
     if user is None or base_url is None:
-        if (
-            "invalid" in last_error.lower()
-            or "password" in last_error.lower()
-            or "credential" in last_error.lower()
-        ):
-            raise AwoxInvalidAuth(last_error)
-        raise AwoxCloudError(last_error)
+        if invalid_auth:
+            raise AwoxInvalidAuth("AwoX account authentication rejected")
+        raise AwoxCloudError("AwoX account import failed")
 
     owner_id = str(user["objectId"])
     session_token = str(user["sessionToken"])

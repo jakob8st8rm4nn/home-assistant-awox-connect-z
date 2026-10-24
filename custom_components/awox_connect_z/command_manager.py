@@ -7,7 +7,7 @@ pure sequencer decides semantic command order and stored-effect recovery.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import time
 from typing import Callable
@@ -23,12 +23,21 @@ from .command_sequences import (
 )
 from .const import (
     DEFAULT_COMMAND_INTERVAL_MS,
+    FADE_WAIT_FACTOR,
     MAX_COMMAND_INTERVAL_MS,
     MAX_COMMAND_WRITE_ATTEMPTS,
     MIN_COMMAND_INTERVAL_MS,
 )
 
 Clock = Callable[[], float]
+
+_SLOT_FIELDS = {
+    "power": ("power",),
+    "brightness": ("brightness", "brightness_transition"),
+    "appearance": ("color", "cct", "appearance_transition"),
+    "effect": ("effect", "stop_effect"),
+}
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +95,7 @@ class CommandNotReadyError(CommandManagerError):
 
 
 class CommandManager:
-    """Manage pending targets and unsent logical commands for one lamp."""
+    """Manage a frozen active group and latest-wins waiting intent per lamp."""
 
     def __init__(
         self,
@@ -124,9 +133,17 @@ class CommandManager:
         self._in_flight_is_finalizer = False
 
         self._last_write_finished_at: float | None = None
+        self._last_write_transition_s = 0.0
         self._replan_after_in_flight = False
 
+        self._confirmation_generations: set[int] = set()
+        self.last_write_generations: frozenset[int] = frozenset()
+        self._confirmation_aliases: dict[int, tuple[frozenset[int], dict]] = {}
+        self._nonmutating_generations: set[int] = set()
         self._request_generation = 0
+        self._frozen_cutoff: int | None = None
+        self._queued_pending = TargetState()
+        self._queued_versions = _PendingVersions()
         self._write_attempts: dict[tuple[object, int], int] = {}
 
         # Manager-owned obligation created only by a confirmed successful
@@ -197,7 +214,119 @@ class CommandManager:
             )
             if version is not None
         }
-        return frozenset(generations)
+        return frozenset(generations | self._confirmation_generations | self._queued_generations())
+
+    @property
+    def write_generations(self) -> frozenset[int]:
+        """Pending physical writes, excluding the separate confirmation barrier."""
+        return frozenset(v for v in (
+            self._pending_versions.power, self._pending_versions.brightness,
+            self._pending_versions.appearance, self._pending_versions.effect,
+            self._power_finalizer_generation, self._in_flight_generation,
+        ) if v is not None)
+
+    @property
+    def power_finalizer_pending(self) -> bool:
+        return self._power_finalizer_generation is not None
+
+    @property
+    def next_command_generation(self) -> int | None:
+        if not self._planned or self._in_flight is not None:
+            return None
+        return self._command_generation(self._planned[0], is_finalizer=self._planned_is_finalizer)
+
+    @property
+    def in_flight_generation(self) -> int | None:
+        return self._in_flight_generation
+
+    def release_confirmation(self, generations: frozenset[int]) -> None:
+        released = set(generations)
+        while True:
+            aliases = {g for g, (parents, _) in self._confirmation_aliases.items() if parents <= released}
+            if aliases <= released:
+                break
+            released.update(aliases)
+        self._confirmation_generations.difference_update(released)
+        for generation in released:
+            self._confirmation_aliases.pop(generation, None)
+        if not self._confirmation_generations:
+            self._nonmutating_generations.clear()
+        self._prune_write_attempts()
+
+    def confirmation_goal(self, generations: frozenset[int]) -> dict:
+        goal = {}
+        for generation, (parents, fields) in sorted(self._confirmation_aliases.items()):
+            if parents & generations:
+                goal.update(fields)
+        return goal
+
+    def confirmation_is_current(self, cutoff: int, generations: frozenset[int]) -> bool:
+        if not generations <= self.pending_generations:
+            return False
+        if self._frozen_cutoff is not None:
+            return True
+        return all(g in self._nonmutating_generations
+                   for g in range(cutoff + 1, self._request_generation + 1))
+
+    @property
+    def execution_generation(self) -> int:
+        return self._frozen_cutoff if self._frozen_cutoff is not None else self._request_generation
+
+    def begin_group(self) -> None:
+        """Freeze accepted intent at the first physical command selection."""
+        if self._frozen_cutoff is None:
+            self._frozen_cutoff = self._request_generation
+
+    def end_group(self) -> None:
+        """Promote only the latest waiting slots after the confirmation barrier."""
+        self._frozen_cutoff = None
+        queued, versions = self._queued_pending, self._queued_versions
+        generations = self._queued_generations()
+        self._queued_pending, self._queued_versions = TargetState(), _PendingVersions()
+        if not self._state.known:
+            return
+        # Preserve the owner of each surviving slot; do not allocate new requests.
+        for generation in sorted(generations):
+            fields = {}
+            for slot, names in self._slot_fields().items():
+                if getattr(versions, slot) == generation:
+                    fields.update((name, getattr(queued, name)) for name in names)
+            self._pending, self._pending_versions = self._merge_pending(
+                self._pending, self._pending_versions, TargetState(**fields), generation,
+            )
+        self._replan()
+
+    @staticmethod
+    def _slot_fields() -> dict[str, tuple[str, ...]]:
+        return _SLOT_FIELDS
+
+    def _queued_generations(self) -> set[int]:
+        return {g for slot in self._slot_fields()
+                if (g := getattr(self._queued_versions, slot)) is not None}
+
+    @staticmethod
+    def _without_generation(target: TargetState, versions: _PendingVersions,
+                            generation: int) -> TargetState:
+        fields = {}
+        for slot, names in _SLOT_FIELDS.items():
+            if getattr(versions, slot) == generation:
+                setattr(versions, slot, None)
+                fields.update((name, False if name == "stop_effect" else None)
+                              for name in names)
+        return replace(target, **fields)
+
+    def _drop_queued_generation(self, generation: int) -> None:
+        self._queued_pending = self._without_generation(
+            self._queued_pending, self._queued_versions, generation,
+        )
+
+    def note_repeat_write(self, finished_at: float, transition: float = 0.0) -> None:
+        """Replay is a physical write, not a second semantic completion."""
+        self._last_write_finished_at = finished_at
+        self.note_write_transition(transition)
+
+    def note_write_transition(self, transition: float) -> None:
+        self._last_write_transition_s = max(0.0, float(transition))
 
     def set_minimum_interval_ms(self, value: int) -> None:
         value = int(value)
@@ -247,7 +376,11 @@ class CommandManager:
             if self._in_flight_generation is not None:
                 self._suppress_followups.add(self._in_flight_generation)
 
+        self._queued_pending, self._queued_versions = TargetState(), _PendingVersions()
         self._clear_pending_targets()
+        self._confirmation_generations.clear()
+        self._confirmation_aliases.clear()
+        self._nonmutating_generations.clear()
         self._power_finalizer_generation = None
         self._clear_expected_stored_intermediate()
         self._planned.clear()
@@ -262,6 +395,8 @@ class CommandManager:
         """Cancel unsatisfied intent owned by exactly one request generation."""
 
         generation = int(generation)
+        self._drop_queued_generation(generation)
+        self._confirmation_generations.discard(generation)
         self._suppress_followups.add(generation)
         self._remove_generation(generation)
 
@@ -284,7 +419,7 @@ class CommandManager:
         """Abort pending request intent at or before ``cutoff``."""
 
         cutoff = int(cutoff)
-        failed = self._pending_generations_at_or_before(cutoff)
+        failed = {g for g in self.pending_generations if g <= cutoff}
         self._suppress_followups.update(failed)
         self._discard_pending_at_or_before(cutoff)
         self._planned.clear()
@@ -311,6 +446,17 @@ class CommandManager:
             )
 
         normalized = normalize_request(self._state, target)
+        if self._frozen_cutoff is not None:
+            # Normalize conflicts/OFF priority now, but retain an explicit stop:
+            # the running group may start an effect after this request arrives.
+            if (target.stop_effect and target.power is not False and target.brightness != 0
+                    and target.color is None and target.cct is None):
+                normalized = replace(normalized, stop_effect=True)
+            self._request_generation += 1
+            self._queued_pending, self._queued_versions = self._merge_pending(
+                self._queued_pending, self._queued_versions, normalized, self._request_generation,
+            )
+            return tuple(self._planned)
 
         # A Stop Effect request must still supersede an older pending/in-flight
         # effect start even if the currently assumed lamp state has no active
@@ -358,6 +504,23 @@ class CommandManager:
             generation,
         )
         self._after_pending_change()
+        if self._confirmation_generations and not self.write_generations:
+            # A no-op based on optimistic state must wait for that state's batch.
+            parents = frozenset(self._confirmation_generations - self._confirmation_aliases.keys())
+            if parents:
+                goal = {}
+                if target.power is False or target.brightness == 0:
+                    goal.update(power=False, effect=None)
+                else:
+                    if target.power is True:
+                        goal["power"] = True
+                    if target.effect is not None:
+                        goal["effect"] = target.effect
+                    elif target.stop_effect:
+                        goal["effect"] = None
+                self._confirmation_aliases[generation] = (parents, goal)
+                self._confirmation_generations.add(generation)
+                self._nonmutating_generations.add(generation)
         return tuple(self._planned)
 
     def _after_pending_change(self) -> None:
@@ -371,7 +534,7 @@ class CommandManager:
             return 0.0
         current = self._clock() if now is None else float(now)
         elapsed = max(0.0, current - self._last_write_finished_at)
-        return max(0.0, self._minimum_interval_s - elapsed)
+        return max(0.0, self._minimum_interval_s + FADE_WAIT_FACTOR * self._last_write_transition_s - elapsed)
 
     def is_ready(self, *, now: float | None = None) -> bool:
         return (
@@ -415,7 +578,7 @@ class CommandManager:
 
         self._in_flight = command
         self._in_flight_generation = generation
-        self._in_flight_generation_cutoff = self._request_generation
+        self._in_flight_generation_cutoff = self.execution_generation
         self._in_flight_retry_cancelled = False
         self._in_flight_is_finalizer = is_finalizer
         self._in_flight_attempt_key = key
@@ -440,9 +603,12 @@ class CommandManager:
 
         state_before = self._state
         self._last_write_finished_at = timestamp
+        self._last_write_transition_s = 0.0
         if self._in_flight_attempt_key is not None:
             self._write_attempts.pop(self._in_flight_attempt_key, None)
 
+        before_write_generations = self.write_generations
+        suppressed_before = frozenset(self._suppress_followups)
         self._state = self._state_after_success(self._state, command)
         self._pending, self._pending_versions = self._pending_after_success(
             self._pending,
@@ -450,6 +616,13 @@ class CommandManager:
             command,
             cutoff,
         )
+
+        # A finalizer owned by an older request can also satisfy a newer ON/OFF
+        # slot. Hold every such waiter, not just the physical command owner.
+        affected = {generation} | (before_write_generations - self.write_generations)
+        affected.difference_update(self._suppress_followups)
+        self.last_write_generations = frozenset(affected)
+        self._confirmation_generations.update(affected)
 
         # Successful brightness and effect-start writes create the power-finalizer
         # obligation unless this generation was explicitly cancelled/aborted.
@@ -469,7 +642,7 @@ class CommandManager:
             and state_before.known
             and state_before.is_on is False
             and generation not in self._suppress_followups
-            and generation == self._request_generation
+            and generation == self.execution_generation
             and self._pending.power is True
             and self._pending_versions.power == generation
         ):
@@ -485,6 +658,10 @@ class CommandManager:
         self._replan_after_in_flight = False
         self._prune_write_attempts()
         self._replan()
+        completed_by_replan = before_write_generations - self.write_generations
+        completed_by_replan = completed_by_replan - suppressed_before
+        self.last_write_generations |= completed_by_replan
+        self._confirmation_generations.update(completed_by_replan)
 
     def mark_write_failed(
         self,
@@ -507,7 +684,8 @@ class CommandManager:
         assert attempt is not None
 
         self._last_write_finished_at = timestamp
-        self._finish_in_flight(keep_attempt_key=True)
+        self._last_write_transition_s = 0.0
+        self._finish_in_flight()
 
         if uncertain:
             # _finish_in_flight() intentionally clears the active slot before
@@ -517,6 +695,9 @@ class CommandManager:
             failed = frozenset((*self.pending_generations, generation))
             self._suppress_followups.update(failed)
             self._power_finalizer_generation = None
+            self._confirmation_generations.clear()
+            self._confirmation_aliases.clear()
+            self._nonmutating_generations.clear()
             self._clear_expected_stored_intermediate()
             self._clear_pending_targets()
             self._planned.clear()
@@ -577,13 +758,8 @@ class CommandManager:
         self._replan()
         return tuple(self._planned)
 
-    def _finish_in_flight(self, *, keep_attempt_key: bool = False) -> None:
-        if not keep_attempt_key:
-            self._in_flight_attempt_key = None
-        else:
-            # Keep the accumulated attempt count in _write_attempts, but there is
-            # no active in-flight key after the result was processed.
-            self._in_flight_attempt_key = None
+    def _finish_in_flight(self) -> None:
+        self._in_flight_attempt_key = None
         self._in_flight = None
         self._in_flight_generation = None
         self._in_flight_generation_cutoff = None
@@ -710,7 +886,7 @@ class CommandManager:
             and self._pending.power is True
             and self._pending_versions.power
             == self._expected_stored_effect_generation
-            and self._request_generation
+            and self.execution_generation
             == self._expected_stored_effect_generation
         )
 
@@ -845,50 +1021,23 @@ class CommandManager:
                 self._power_finalizer_generation,
             )
             if version is not None and version <= cutoff
-        }
+        } | {g for g in self._confirmation_generations if g <= cutoff}
 
     def _remove_generation(self, generation: int) -> None:
-        pending = self._pending
-        versions = self._pending_versions
-
-        power = pending.power
-        brightness = pending.brightness
-        brightness_transition = pending.brightness_transition
-        color = pending.color
-        cct = pending.cct
-        appearance_transition = pending.appearance_transition
-        effect = pending.effect
-        stop_effect = pending.stop_effect
-
-        if versions.power == generation:
-            power = None
-            versions.power = None
-        if versions.brightness == generation:
-            brightness = None
-            brightness_transition = None
-            versions.brightness = None
-        if versions.appearance == generation:
-            color = None
-            cct = None
-            appearance_transition = None
-            versions.appearance = None
-        if versions.effect == generation:
-            effect = None
-            stop_effect = False
-            versions.effect = None
-
-        self._pending = TargetState(
-            power=power,
-            brightness=brightness,
-            brightness_transition=brightness_transition,
-            color=color,
-            cct=cct,
-            appearance_transition=appearance_transition,
-            effect=effect,
-            stop_effect=stop_effect,
+        self._confirmation_generations.discard(generation)
+        self._confirmation_aliases.pop(generation, None)
+        self._pending = self._without_generation(
+            self._pending, self._pending_versions, generation,
         )
 
     def _discard_pending_at_or_before(self, cutoff: int) -> None:
+        for generation in self._queued_generations():
+            if generation <= cutoff:
+                self._drop_queued_generation(generation)
+        for generation in tuple(self._confirmation_aliases):
+            if generation <= cutoff:
+                self._confirmation_aliases.pop(generation, None)
+        self._confirmation_generations.difference_update(g for g in tuple(self._confirmation_generations) if g <= cutoff)
         versions = [
             value
             for value in (

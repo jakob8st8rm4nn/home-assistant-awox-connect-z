@@ -8,6 +8,7 @@ Unofficial integration for **EGLO / AwoX Connect.Z RGB/TW lights**, controlled l
 over Home Assistant Bluetooth adapters and **ESPHome Bluetooth Proxies**.
 Import lamp data from HomeControl or set up a mesh locally using known credentials.
 Normal light control does not use the cloud or require modified lamp firmware.
+Each lamp is connected directly; mesh forwarding and route selection are not supported.
 
 > **Experimental / community-supported:** compatibility beyond the tested hardware
 > still needs confirmation.
@@ -21,9 +22,9 @@ review and device compatibility reports are welcome.
 
 ## Features and tested hardware
 
-- Power, brightness, hue/saturation color, tunable white, transitions and the native **Color cycle** / **Candle** effects.
+- Power, brightness, hue/saturation color, tunable white (**2700–6500 K**), transitions and the native **Color cycle** / **Candle** effects.
 - HomeControl import, fully local setup and Reconfigure for lamp/mesh management.
-- Live state correction from BLE advertisements and configurable availability.
+- State updates from BLE advertisements, command-group confirmation through session-scoped 1911 replies, and configurable availability.
 - On-demand BLE connections, idle disconnect, configurable command concurrency and same-lamp latest-wins command coalescing.
 - Bluetooth discovery of additional provisioned lamps plus per-lamp diagnostic sensors and credential-redacted diagnostics.
 
@@ -35,11 +36,11 @@ review and device compatibility reports are welcome.
 
 Requires **Home Assistant 2026.10+**, its Bluetooth integration, and a connectable
 adapter or ESPHome Bluetooth Proxy within connection range of the lamps.
-Control requires a valid state advertisement before the first command after setup
-or reload. The Bluetooth source must supply raw advertisement packets. Requests
-are rejected while the lamp state required for command planning is unknown. If
-that state becomes unknown during a request, pending work is aborted with an error
-instead of waiting for a later advertisement.
+Control requires a known lamp state. Fresh advertisements can supply it; if it is
+unknown at request time, the integration connects and makes a bounded 1911 status
+query before planning. Normal control also requires working 1911 notifications
+on the directly connected lamp. Raw advertisements remain an independent state
+source. An unresolved unknown state fails the request instead of waiting indefinitely.
 
 **HACS:** Add `https://github.com/jakob8st8rm4nn/home-assistant-awox-connect-z` under
 **Custom repositories**, category **Integration**. Install **AwoX Connect.Z** and
@@ -48,8 +49,9 @@ restart Home Assistant.
 **Manual:** Copy `custom_components/awox_connect_z` to
 `/config/custom_components/awox_connect_z` and restart Home Assistant.
 
-**Updating:** Update and restart Home Assistant. Existing entries and saved
-options are retained; no reconfiguration is required. See [CHANGELOG.md](CHANGELOG.md).
+**Updating:** Only the current config-entry format is supported. Older entries
+are not migrated automatically and may need to be removed and set up again.
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## Setup and lamp management
 
@@ -96,24 +98,32 @@ lamps or lamps with different mesh credentials cannot join through that flow.
 
 | Sensor | Meaning |
 |---|---|
-| Signal Strength | Last-known advertisement RSSI while connected or during post-disconnect grace; otherwise requires a recent packet. |
+| Signal Strength | RSSI from the last received advertisement; retained as historical data. |
 | Last Seen | Time of the last received Bluetooth advertisement. |
-| Bluetooth Status | Connected with active BLE; visible with a recent advertisement or during idle-disconnect grace; unreachable after expiry. Initially unknown without current evidence. |
+| Bluetooth Status | Connected, visible, recently connected, unreachable, or unknown. See the rules below. |
 | Mesh ID | Stored mesh address; attributes show the advertised address and whether it matches. |
-| Current Bluetooth Source | Last-known preferred advertisement source while connected or during post-disconnect grace; otherwise requires a recent packet. |
-| Last Connection | Adapter/proxy used for the last successful connection, when identifiable. |
+| Last Bluetooth Source | Bluetooth source of the last received advertisement; retained independently of connection state. |
+| Last Connection | Adapter/proxy used for the last successfully authenticated connection, when identifiable. |
 
-Diagnostics use existing Bluetooth data without creating additional connections.
-Cached advertisements retain their original reception time across reloads; only
-packets within the availability timeout count as visible. Startup grace does not
-confirm visibility. While BLE-connected, source and RSSI retain their last-known
-values until advertisements update them. This does not refresh Last Seen. After
-a regular idle disconnect, these values remain for the configured availability
-timeout (30 s by default). A new advertisement resumes normal packet freshness;
-without one, source/RSSI become unknown and status becomes unreachable when the
-grace period expires. Reloading does not create post-disconnect grace. Last Seen and Last
-Connection retain their historical meaning.
-The diagnostic download includes command timing and write attempts, historical errors
+The light is available while connected, visible or recently connected. One
+**Availability timeout** applies independently to the last advertisement and the
+last connection proof. When disconnected and both are still valid, the newer
+evidence decides the status: the final connection proof remains recently connected
+until a newer advertisement arrives. A regular idle disconnect records its final
+known live connection before cleanup; unexpected link loss does not start a new timeout.
+With no evidence the status is unknown and the light is unavailable. Once known
+evidence expires, status is unreachable and the light is unavailable.
+
+Reload preserves original evidence timestamps within the same HA process, without
+resetting evidence ages or restoring BLE sessions. A still-active connection at unload
+provides a final connection proof before cleanup. The last advertisement source, RSSI
+and Last Seen history are retained across an entry reload. Newer advertisement
+history replaces them; equal-time packets may refine source/RSSI. A full HA restart
+obtains new evidence. Last Seen, Signal
+Strength and Last Bluetooth Source are updated only by advertisements. Diagnostics
+create no extra BLE requests. Exact transitions and reload rules: [availability model](docs/availability.md).
+
+The diagnostic download includes the notification setup method (`status_notify_method`), the last session-scoped 1911 status, initial-status poll counts, confirmation polls, passive confirmations, repeats and unconfirmed/superseded batches. Last status remains diagnostic history after disconnect, but cannot confirm a new session. It also includes command timing and write attempts, historical errors
 with command context, connection timestamps and the last observed mesh-ID timestamp.
 Command duration covers the client operation, excluding earlier entity waiting.
 Mesh-ID mismatches are reported without changing the stored address.
@@ -124,18 +134,18 @@ Open the integration and choose **Configure**. Options apply to its mesh entry.
 
 | Setting | Default | Purpose |
 |---|---|---|
-| Transition | 0.2 s | Fade duration; use `0` for immediate changes. Explicit Home Assistant `transition` values override it. |
+| Transition | 0.2 s | Default fade duration, configurable from 0–30 s; use `0` for immediate changes. Explicit Home Assistant `transition` values override it. Subsequent controls allow extra time for the fade; see [command spacing](docs/command-sequences.md#command-spacing). |
 | Command interval | 250 ms | Minimum spacing between consecutive writes to the same lamp; configurable from 0–2000 ms. |
 | Idle disconnect | 10 s | Release the BLE connection after inactivity. A longer value can speed up repeated control but occupies a connection slot longer. |
 | Max Concurrent Commands | 2 | Allow 1–32 simultaneous command operations per entry. Available adapter/proxy capacity still limits operation. |
 | Availability timeout | 30 s | Mark a lamp unavailable after 10–300 seconds without Bluetooth liveness or a working HA connection. |
 
-- **Connections:** New control connections are established one at a time across AwoX entries. Already-connected lamps can be controlled in parallel, within the configured limit.
-- **Rapid changes:** Pending power, brightness, appearance and effect intent are merged by the command manager. Newer values replace only the relevant target slots; unsent work is replanned against the latest known lamp state. A successful brightness write or actual native-effect start creates a manager-owned power-finalizer obligation that survives ordinary replanning.
-- **Combined commands:** Brightness, color/CCT and native-effect targets can be submitted together. Requests are normalized first (for example, Power OFF/brightness 0 dominates the same request), then the sequence planner applies the documented order for OFF/ON/effect states.
-- **Command spacing:** The command manager enforces the configured minimum interval between every two writes to the same lamp, including manager-approved retries and commands originating from separate HA requests. A value of 0 ms disables only the intentional wait.
-- **Native effects:** Color cycle and Candle run in the lamp. Each actual effect start is followed by a required power command, normally ON or OFF if a newer request requires it; this also applies when the lamp is assumed to be ON. The configured command spacing still applies. Brightness changes preserve an active effect, while an unexpected stored-effect state while OFF is treated as a recovery condition: the sequencer clears it with the matching effect-stop command before planning the new request. Unknown effect state is tracked internally until confirmed. See the [protocol reference](docs/protocol.md) for mode tables and command details.
-- **Lamp state:** Bluetooth advertisements correct power, brightness, color mode and native effect state. These updates can pause while Home Assistant or the phone app holds a connection; idle disconnect alone does not make the lamp unavailable.
+- **Connections:** New connections are established one at a time across AwoX entries. Connected lamps can be controlled in parallel, within the configured limit and available Bluetooth slots.
+- **Rapid changes:** A started command group finishes, including confirmation and any repeat. New requests are collected separately; newer values replace older waiting targets. Even OFF waits for the running group. Replaced waiting targets do not produce superseded errors.
+- **Combined commands:** The integration orders color/CCT, brightness and effects and adds required power completion. See [Command sequences](docs/command-sequences.md) for exact rules.
+- **Native effects:** Candle and Color Cycle run inside the lamp. The successful group-confirmation reply supplies the reported state, including convertible color/CCT. Color Cycle appearance is a momentary sample.
+- **Confirmation:** Commands are confirmed through 1911 status, with bounded polling and at most one complete group repeat. Status confirmation does not guarantee physical light output.
+- **State updates:** Advertisements provide normal state updates. 1911 updates the displayed state only after successful group confirmation or an initial UNKNOWN-state query; other replies remain diagnostic data. Advertisements can pause during an active connection; this alone does not make the lamp unavailable.
 
 ## Technical documentation
 
@@ -174,9 +184,13 @@ A lamp may advertise even when a controllable connection cannot be established.
 
 ### State differs from the physical lamp
 
-Live correction depends on long BLE advertisements, not GATT status notifications.
-Allow advertisements to resume after an active BLE connection ends. Model and
-firmware differences may also affect state decoding.
+State updates use complete BLE advertisements and the selected result of a
+successful 1911 group confirmation or initial UNKNOWN-state query. Other 1911
+replies do not overwrite the displayed state or planner. Neither source proves
+physical light output. Allow advertisements to resume after an active BLE
+connection ends. For native effects, a group confirmation may update the displayed
+color/CCT; later effect advertisements preserve that appearance.
+Model and firmware differences may also affect state decoding.
 
 ## Reports and contributions
 

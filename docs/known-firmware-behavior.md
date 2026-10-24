@@ -1,61 +1,114 @@
 # Known firmware behavior
 
-Initial hardware testing with AwoX/EGLO Connect.Z lamps revealed the tabled behavior when commands were sent in quick succession **without an intentional delay**. Additional Candle observations with and without spacing are described separately below. Physical light output and the state reported in Bluetooth advertisements did not always match.
-
-These observations apply to the tested hardware and firmware. Other models or firmware versions may behave differently. The table describes observed outcomes, not guaranteed behavior on every command.
+Observed on the tested AwoX/EGLO Connect.Z lamps. These outcomes are not guarantees
+for every command or firmware version. Reported state and physical light output
+can disagree; a matching advertisement or 1911 reply does not prove visible light.
 
 ## Observed behavior
 
-| Command sequence or operation | Physical behavior | State reported in Bluetooth advertisements |
-| --- | --- | --- |
-| Power OFF → Brightness | The lamp may remain off. | The new brightness may already be reported despite the lamp remaining off. |
-| Power ON → Brightness | The lamp changes brightness. | The previous brightness may still be reported. |
-| Color / color temperature → Brightness | The lamp adopts the requested color or color temperature and brightness. | Brightness may remain at an older value. |
-| Brightness change during Color Cycle | Brightness changes as requested. | The previous brightness may remain until the effect stops. |
-| Brightness change during Candle | Brightness changes as requested. | The new brightness is reported correctly in the observed tests. |
-| Brightness → Effect start | The lamp may settle at an unexpected intermediate brightness. | Candle reports that level while running; Color Cycle may report it correctly only after the effect stops. |
+The following cases were investigated with commands in quick succession,
+**without intentional spacing**:
 
-The Candle row records a working comparison case, rather than a reporting failure. Similar problems have also been observed with the official AwoX app, suggesting that lamp firmware contributes to the behavior. This does not establish the internal cause of each case.
+| Command sequence or operation | Physical behavior | State reported in advertisements |
+|---|---|---|
+| Power OFF → Brightness | The lamp may remain off. | New brightness may already be reported. |
+| Power ON → Brightness | Brightness changes. | Previous brightness may remain reported. |
+| Color / CCT → Brightness | Requested appearance and brightness are applied. | Brightness may remain at an older value. |
+| Brightness change during Color Cycle | Brightness changes. | Previous brightness may remain until the effect stops. |
+| Brightness change during Candle | Brightness changes. | New brightness was reported correctly in the observed tests. |
+| Brightness → Effect start | The lamp may settle at an unexpected intermediate brightness. | Candle reports that level; Color Cycle may report it correctly only after stopping. |
+
+The Candle comparison is not a reporting failure. Similar inconsistencies were
+observed with the official app, suggesting firmware involvement without proving
+each internal cause. The integration uses mandatory power completion after
+brightness and actual effect starts; see [Power finalization](command-sequences.md#power-finalization).
 
 ## Color-to-effect transition from CCT mode
 
-`Color → Effect` may fail when the lamp was previously in color-temperature (CCT) mode.
+A `Color → Effect` sequence may fail when the lamp was previously in CCT mode.
+The integration sends appearance before effect start and requires a power
+completion. Neither this sequence nor configured command spacing guarantees that
+every transition succeeds. Combined-target rules are defined in
+[Command sequences](command-sequences.md).
 
-- The command-sequence specification uses `COLOR/CCT → EFFECT START → POWER ON`.
-- The power completion also applies when the assumed lamp state is already ON; it does not guarantee that every color-to-effect transition succeeds.
-- During physical execution, the command manager still applies the configured minimum spacing between writes; that spacing does not guarantee that this particular transition succeeds.
+## Native fades followed by effects
 
-For CCT + Effect, the same normal `Color/CCT + Start Effect` rules apply. A request containing both Color and CCT is rejected by the conflict rule unless the higher-priority OFF normalization (explicit Power OFF or `Brightness = 0`) has already reduced the request to pure Power OFF; see [Command sequences](command-sequences.md).
+An effect started before a preceding Color/CCT/Brightness fade finishes can
+interrupt the transition or retain an intermediate value. This was investigated
+with CCT 6500 K followed by Candle at a 0.2 s fade and with longer fades.
+
+The command pipeline adds `1.25 × encoded transition time` to the configured
+control interval after these three command types. Targeted direct-connection
+tests of CCT-to-Candle at 0.2, 1, 3, 10 and 30 s confirmed the requested CCT and
+effect on both lamps (10/10); this limited sample does not establish complete
+prevention or physical light output. Required power completion remains in place.
+See [Command spacing](command-sequences.md#command-spacing).
 
 ## Candle: physical light turns off while status still reports ON
 
-Hardware tests observed a previously switched-on and visibly lit lamp turning physically off when color/color-temperature commands and Candle start were sent in quick succession.
+A previously lit lamp could turn physically off after rapidly consecutive
+color/CCT and Candle-start commands, while both advertisements and 1911 still
+reported Power ON.
 
-- Bluetooth advertisements and 1911 status responses could still report Power ON. A matching status response therefore does not prove that the lamp is physically emitting light.
-- A minimum interval of **250 ms** between lamp commands substantially reduced the observed occurrence, but did not demonstrably eliminate it.
-- An additional `POWER ON` as the next lamp command after Candle start was tested as a countermeasure and substantially improved agreement between reported and physical state. Normal command spacing still applies before that power command. Complete prevention has not been established.
+- A **250 ms** command interval substantially reduced occurrences but did not
+  demonstrably eliminate them.
+- An additional `POWER ON` immediately next in command order after Candle start
+  substantially improved agreement with physical output. Normal command spacing
+  still applies; complete prevention has not been established.
 
-These observations suggest a firmware issue involving particular sequences or timing. The exact internal trigger is unknown. The specifically observed physical-off case concerns Candle. Applying the same mandatory power completion to Color Cycle is a conservative common sequencing rule; it is not evidence that the identical physical failure has been demonstrated for Color Cycle.
+The internal trigger is unknown. This physical-off observation concerns Candle.
+Using the same mandatory power completion for Color Cycle is a conservative
+sequencing rule, not evidence of the identical physical failure for Color Cycle.
+The finalizer's handling of newer OFF requests and effect stops is specified in
+[Power finalization](command-sequences.md#power-finalization).
 
-The integration enforces this power completion in both the sequencer and command manager, analogous to brightness finalization.
+## Hue boundary reporting
 
-- A newer accepted OFF target may replace an unsent `POWER ON` completion with `POWER OFF`.
-- Effect stop alone does not require an extra power command.
+| Situation | Observed report |
+|---|---|
+| Static hue `0xFE` or `0xFF` sent | Hue `0x00` in 1911 and advertisements |
+| Hue `0xFD` / saturation `0xFF` after deliberately sent hue `0xFE`/`0xFF` | Hue `0xFE`, including after a new connection; neutral-start controls returned `0xFD` |
+| Raw hue 252 after the normal red/zero endpoint | Raw hue 253 in a sequential conversion comparison |
+| Running Color Cycle, mode `0x07` | Dynamically generated hue `0xFF` on both lamps, without a hue-`0xFF` control during the effect |
 
-See [Power finalization](command-sequences.md#power-finalization).
+These observations show history-dependent and effect-specific behavior, not a
+colorimetric calibration. A symmetric 254/255 conversion comparison found no
+reported-accuracy benefit from changing the existing static 254-position scale.
+Avoiding sent `0xFE`/`0xFF` does not eliminate every one-step boundary shift.
+
+The integration preserves received raw values, emits only hue 0–253 and adds no
+special recovery command or delay for these cases. See
+[Value ranges](protocol.md#brightness-hue-and-saturation-ranges) for conversion
+and accepted-field rules. White-mode `0xFF` color bytes are ordinary placeholders.
+
+## Color Cycle to CCT intermediate status
+
+Both lamps reported these 1911 sequences during a CCT command:
+
+| Power | Before | Intermediate | Final |
+|---|---|---|---|
+| OFF | `0x06` — Color Cycle, HS base | `0x04` — cycle bit, CCT base | `0x00` — no effect, CCT |
+| ON | `0x07` — Color Cycle, HS base | `0x05` — cycle bit, CCT base | `0x01` — no effect, CCT |
+
+The final replies arrived automatically before the first manual poll. The
+intermediates were reproduced with and without intentional command spacing;
+they were not observed in the opposite CCT → Color Cycle direction or in
+advertisements. This does not exclude other behavior on other firmware.
+
+The integration retains the reported effect identity instead of treating the
+intermediate as a completed stop; see
+[Native-effect replies](command-sequences.md#native-effect-replies-and-displayed-appearance).
 
 ## Impact on Home Assistant
 
-The integration uses Bluetooth advertisements to update lamp state. Consequently, Home Assistant may display an outdated brightness value even when the physical light output has changed. Conversely, a reported brightness change does not necessarily mean the lamp has switched on.
-
-- An incorrect reported value may persist beyond the initial transition.
-- A successful Bluetooth write alone does not confirm that the physical output and the advertised state agree.
+Reported brightness can remain outdated after a transition, and reported ON does
+not prove physical light output. A successful group-confirmation reply may update
+the native-effect color/CCT display; other 1911 replies do not synchronize HA.
+Effect advertisements preserve the displayed appearance. See
+[the display rules](command-sequences.md#native-effect-replies-and-displayed-appearance).
 
 ## Command sequencing and spacing
 
-- The minimum command interval defaults to **250 ms**, with an allowed range of **0–2000 ms**.
-- A value of **0 ms** disables intentional spacing.
-
-The command sequences and configurable minimum interval between commands are described in [Command sequences](command-sequences.md). Spacing commands and selecting an appropriate sequence are intended to reduce the observed inconsistencies; they are not a guarantee for every hardware or firmware version.
-
-This page records hardware observations. The command-sequence document describes how the integration handles requests; it does not claim that spacing eliminates every firmware issue.
+Request normalization, power completion, confirmation and configurable spacing
+are defined in [Command sequences](command-sequences.md). These measures reduce
+observed inconsistencies but do not guarantee correct physical output.

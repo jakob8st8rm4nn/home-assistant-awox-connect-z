@@ -5,6 +5,9 @@ from __future__ import annotations
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .const import (
+    CANDLE_STATUS_MODES,
+    COLOR_CYCLE_STATUS_MODES,
+    SUPPORTED_STATUS_MODES,
     MAX_COLOR_TEMP_KELVIN,
     MAX_MESH_ID,
     MESH_CREDENTIAL_MAX_BYTES,
@@ -127,8 +130,8 @@ def make_power(on: bool, *, mesh_id: int) -> bytes:
 def make_brightness(
     level: int, transition: float = 0.2, *, mesh_id: int
 ) -> bytes:
-    """Brightness 1..254, addressed to one device."""
-    level = max(1, min(254, int(level)))
+    """Brightness 1..255, addressed to one device."""
+    level = max(1, min(255, int(level)))
     block = bytearray.fromhex(
         "00 0c 00 00 01 08 00 04 00 02 00 00 00 00 00 00"
     )
@@ -146,17 +149,17 @@ def make_hs_color(
     mesh_id: int,
 ) -> bytes:
     """Hue/Saturation command addressed to one device."""
-    hue = round((float(hue_degrees) % 360.0) * 254.0 / 360.0)
+    hue = round((float(hue_degrees) % 360.0) * 254.0 / 360.0) % 254
     saturation = round(
-        max(0.0, min(100.0, float(saturation_percent))) * 254.0 / 100.0
+        max(0.0, min(100.0, float(saturation_percent))) * 255.0 / 100.0
     )
 
     block = bytearray.fromhex(
         "00 0a 00 00 01 00 03 06 00 00 02 00 00 00 00 00"
     )
     _put_destination(block, mesh_id)
-    block[8] = max(0, min(254, hue))
-    block[9] = max(0, min(254, saturation))
+    block[8] = hue
+    block[9] = max(0, min(255, saturation))
     _put_u16_le(block, 10, _transition_ds(transition))
     return finalize_block(block)
 
@@ -213,5 +216,48 @@ def make_candle_effect(enabled: bool, *, mesh_id: int) -> bytes:
 
 
 def ha_brightness_to_device(brightness: int) -> int:
-    """Map Home Assistant 1..255 to the device's 1..254."""
-    return max(1, min(254, round(int(brightness) * 254 / 255)))
+    """Preserve Home Assistant brightness 1..255; zero is planned as POWER OFF."""
+    return max(1, min(255, int(brightness)))
+
+
+def aes_decrypt_reversed(key: bytes, value: bytes) -> bytes:
+    """Inverse of the authenticated transport's reversed AES block."""
+    if len(key) != 16 or len(value) != 16:
+        raise ValueError("AES key and input must both be 16 bytes")
+    decryptor = Cipher(algorithms.AES(key[::-1]), modes.ECB()).decryptor()
+    return decryptor.update(value[::-1])[::-1]
+
+
+def make_status_query(session_key: bytes, mesh_id: int) -> bytes:
+    """1911-directed query: 02 + AES(CRC,03,0A,MID-low,MID-high,zeroes)."""
+    if not is_valid_device_mesh_id(mesh_id):
+        raise ValueError("Invalid individual status target")
+    body = bytes((3, 10, mesh_id & 255, mesh_id >> 8))
+    block = (bytes((crc8_awox(body),)) + body).ljust(16, bytes(1))
+    return bytes((2,)) + aes_encrypt_reversed(session_key, block)
+
+
+def parse_status_1911(session_key: bytes, payload: bytes) -> dict:
+    """Parse the confirmed 20-byte status envelope; no invented reply CRC.
+
+    CRC validation is established for outbound queries, not for these replies.
+    Header/footer, decrypted marker and supported mode are validated here;
+    identity and session freshness are validated by Status1911Store.
+    """
+    if len(payload) != 20 or payload[0] not in (0x80, 0x82) or payload[19] != 0x60:
+        raise ValueError("Unsupported 1911 envelope")
+    block = aes_decrypt_reversed(session_key, payload[1:17])
+    if block[5:7] != bytes.fromhex("9620") or block[12] not in SUPPORTED_STATUS_MODES:
+        raise ValueError("Unsupported 1911 state")
+    # Color Cycle can report FF as a dynamic hue. Preserve native-effect
+    # packets (including Candle) without treating FF as a static color angle.
+    # White-mode color bytes remain placeholders; static HS still rejects FF.
+    if (block[12] & 0x02 and payload[17] == 0xFF
+            and block[12] not in (*COLOR_CYCLE_STATUS_MODES, *CANDLE_STATUS_MODES)):
+        raise ValueError("Unsupported 1911 hue FF in static color mode")
+    mesh_id = int.from_bytes(block[:2], "little")
+    if not is_valid_device_mesh_id(mesh_id):
+        raise ValueError("Invalid 1911 field")
+    return dict(outer_type=payload[0], mesh_id=mesh_id, mac_suffix=block[7:11], mode=block[12],
+                brightness=block[13], mired=int.from_bytes(block[14:16], "little"),
+                hue=payload[17], saturation=payload[18])

@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.0] - Unreleased
+
+### Added
+
+- Receive and validate session-scoped 1911 notifications (outer type `0x80`) for directly connected lamps; decode but ignore mesh replies (`0x82`), including power, brightness, HS color, CCT and native effects. Initialize Notify/0x01 once per authenticated session and support directed status queries.
+- Confirm executed command groups with a 250 ms base response window, extended by 1.25 times the encoded transition when the final command fades; accept earlier matching replies. Retain up to seven manual polls and one complete identical group repeat, separate from per-write transport retries.
+- Obtain a bounded 1911 initial state when a new HA request finds the planner UNKNOWN, without adding readiness to ordinary known-state requests.
+- Include session status and confirmation counters in diagnostics.
+
+### Changed
+
+- Apply 1911 state only through successful group confirmation or explicit UNKNOWN bootstrap. Retain other replies for confirmation storage, connection evidence and diagnostics, without synchronizing the HA display or planner.
+- Apply color/CCT from the final successful 1911 group-confirmation reply to the HA display, including native effects. Preserve effect appearance for advertisements; unavailable hue values do not invent a display color.
+- Extend the configurable default transition range to 0–30 seconds; keep the 0.2-second default and explicit action overrides.
+- Bluetooth status now follows the newest still-valid evidence after disconnect: a final connection proof remains `recently_connected` until a newer advertisement arrives.
+- Use one reachability model: connected, visible, recently connected, unreachable or unknown. Preserve original advertisement/connection timestamps across entry reloads within one HA process; no artificial startup grace. Keep Last Bluetooth Source, Signal Strength and Last Seen as sticky historical values from the newest advertisement, independent of the proxy/adapter recorded as Last Connection.
+- Support Connect.Z 1911 notifications without a CCCD on ESPHome proxies using the vendor subscription path; retain standard Bleak notification setup when a CCCD is present or another backend is used.
+- Accept intermediate Color Cycle/CCT modes `0x04`/`0x05` without falsely confirming an effect stop. Use the same complete-mode mapping for 1911 and advertisements; the intermediate values were observed through 1911.
+- Preserve native-effect packets containing hue `0xFF` without deriving a fixed hue angle. Keep unsupported static HS hue `0xFF` rejected with 1911 diagnostics; brightness/saturation `0xFF` and white placeholders remain accepted.
+- Preserve brightness 1–255 without rescaling and saturation 0–255 with matching percentage conversion. Keep zero-brightness requests as POWER OFF and accept raw 255 status values.
+- Use the 254-step hue circle while emitting only 0–253 (rounded 254 wraps to zero). Preserve received hue bytes including 254 and document the observed sequence-dependent boundary behavior.
+- Finish started command groups and their confirmation before executing newer requests. Merge waiting targets separately with latest-wins semantics, preserving independent slots and mandatory power finalizers; even a newer OFF waits for the running group.
+- Apply confirmed 1911 state after a batch; prevent intermediate replies and newer requests from replanning the running group. Replace waiting targets without superseded errors. Permit one complete repeat despite newer waiting requests, but never replay across reconnects.
+- Send all lamp controls, including the first attempt and confirmation repeats, with `response=False`; retain 1911 state confirmation and the existing authentication write mode.
+- Mark planner state UNKNOWN and fail pending work after final confirmation failure. Retain the existing conservative policy for ambiguous transport writes.
+- Add 1.25 times the encoded transition after Color, CCT and Brightness to the configured same-lamp control interval, including power finalizers, later groups and complete repeats. Keep status polling separate and idle disconnect off while a group is being executed or confirmed.
+
+### Fixed
+
+- Publish light availability and Bluetooth status from one reachability snapshot so a timeout cannot expire between entity reads and briefly show the light available while Bluetooth Status already reports unreachable.
+- Avoid republishing a stale light state when Bluetooth availability becomes true or link diagnostics change while a command group is executing, while still publishing an availability loss immediately so the light cannot remain briefly available after reachability expires.
+- Publish the light's `ble_connected` attribute on link changes outside active command groups even when availability stays true, and keep advertisement-source diagnostics consistent between sensors and diagnostic exports. During an active group, defer the light-state publication to its completion.
+- Recheck the local BLE connection flag once per second while connected, so unexpected link loss does not leave the light available until the next full availability timeout. Retain only unexpired real evidence; do not add Bluetooth polls or alter the regular disconnect deadline.
+- Invalidate an unconfirmed optimistic planner state when cancellation removes all owners of a selected group; do not revive cancelled power finalizers.
+- Recheck Bluetooth device ownership after authentication and clean up clients, callbacks and background tasks when setup fails or is cancelled.
+- Reject unusable cloud destinations before duplicate selection, validate response objects/results, and allow transport failures to try the next login server without hiding an earlier authentication rejection.
+- Keep UNKNOWN bootstrap connect-queue waiting outside its active connection budget and measure replay freshness at the actual GATT write boundary.
+
+### Internal
+
+- Consolidate target-slot removal, local scan selection, verification-client creation, status field conversion and session-bound poll/replay writes. Derive each immutable group goal once and avoid duplicate diagnostic reads.
+- Remove legacy entry migration, setup-method inference, unused internal APIs and duplicate diagnostic export aliases. Omit account email from downloaded diagnostics.
+- Run isolated offline regression suites in CI; hardware and live Home Assistant verification remain separate.
+
 ## [1.11.1] - 2026-10-21
 
 ### Fixed
@@ -252,7 +296,6 @@ All notable changes to this project will be documented in this file.
 - On integration setup/reload, cached advertisement replay is disabled and advertisement deduplication history is cleared after callback registration where the respective Home Assistant APIs are available. This allows the next real packet to be delivered even when its payload is unchanged.
 - Where supported by Home Assistant, advertisement history is also cleared during cleanup when a known BLE session has already dropped unexpectedly.
 - The default BLE idle-disconnect timeout is now 10 seconds instead of 20 seconds so lamps can resume advertising sooner after Home Assistant control. Explicitly saved timeout settings remain unchanged.
-
 
 ## [1.1.0] - 2026-09-28
 

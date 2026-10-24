@@ -28,6 +28,8 @@ DEFAULT_NAME = "AwoX Connect.Z"
 # Shared Home Assistant runtime data key for serializing new BLE connection
 # establishment across all loaded AwoX config entries.
 DATA_RUNTIME_CONNECT_LOCK = "_runtime_connect_lock"
+# Process-local evidence survives entry reload, but never a HA restart.
+DATA_AVAILABILITY_EVIDENCE = f"{DOMAIN}_availability_evidence"
 
 
 # -----------------------------------------------------------------------------
@@ -36,7 +38,7 @@ DATA_RUNTIME_CONNECT_LOCK = "_runtime_connect_lock"
 # Transition, idle-disconnect and availability timeout values are in seconds.
 DEFAULT_TRANSITION = 0.2
 MIN_TRANSITION = 0.0
-MAX_TRANSITION = 10.0
+MAX_TRANSITION = 30.0
 
 DEFAULT_IDLE_DISCONNECT = 10.0
 MIN_IDLE_DISCONNECT = 5.0
@@ -47,11 +49,13 @@ MIN_CONCURRENT_COMMANDS = 1
 MAX_CONCURRENT_COMMANDS = 32
 
 # A lamp stays available while HA has a live BLE connection or a Bluetooth
-# packet has been seen within this configurable window.
+# advertisement or connection proof is within this configurable window.
 DEFAULT_AVAILABILITY_TIMEOUT = 30.0
 MIN_AVAILABILITY_TIMEOUT = 10.0
 MAX_AVAILABILITY_TIMEOUT = 300.0
 
+# Additional post-write time for native brightness/appearance fades.
+FADE_WAIT_FACTOR = 1.25
 DEFAULT_COMMAND_INTERVAL_MS = 250
 MIN_COMMAND_INTERVAL_MS = 0
 MAX_COMMAND_INTERVAL_MS = 2000
@@ -102,6 +106,16 @@ RUNTIME_CONNECT_QUEUE_LOG_THRESHOLD_SECONDS = 0.05
 
 
 # -----------------------------------------------------------------------------
+# 1911 command confirmation
+# -----------------------------------------------------------------------------
+# 1911 response policy is separate from same-lamp control-command spacing.
+CONFIRMATION_AUTO_WAIT_MS = 250
+CONFIRMATION_POLL_WINDOW_MS = 250
+CONFIRMATION_MAX_POLLS = 7
+CONFIRMATION_MAX_GROUP_REPEATS = 1
+
+
+# -----------------------------------------------------------------------------
 # Availability and diagnostic publishing
 # -----------------------------------------------------------------------------
 # Poll cadence while unavailable so identical deduplicated packets can restore
@@ -147,6 +161,18 @@ AWOX_COMPANY_ID = 0x0160
 PAIR_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1914"
 COMMAND_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1912"
 STATUS_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1911"
+
+# Supported complete status combinations; do not infer unknown effect bits.
+# 0x04/0x05 were observed through 1911 during Color Cycle -> CCT transitions.
+COLOR_CYCLE_STATUS_MODES = (0x04, 0x05, 0x06, 0x07)
+CANDLE_STATUS_MODES = (0x10, 0x11, 0x12, 0x13)
+SUPPORTED_STATUS_MODES = (0x00, 0x01, 0x02, 0x03, *COLOR_CYCLE_STATUS_MODES, *CANDLE_STATUS_MODES)
+STATUS_EFFECTS = {
+    **dict.fromkeys((0x00, 0x01, 0x02, 0x03)),
+    **dict.fromkeys(COLOR_CYCLE_STATUS_MODES, EFFECT_COLOR_CYCLE),
+    **dict.fromkeys(CANDLE_STATUS_MODES, EFFECT_CANDLE),
+}
+
 
 
 # -----------------------------------------------------------------------------

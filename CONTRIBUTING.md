@@ -12,7 +12,7 @@ Compatibility reports are especially useful. Please include:
 - hardware version,
 - Home Assistant version,
 - Bluetooth path used (local adapter or ESPHome Bluetooth Proxy),
-- which functions work: power, brightness, color, color temperature,
+- which functions work: power, brightness, color, color temperature and native effects,
 - relevant logs if something fails.
 
 ## Security and privacy
@@ -33,6 +33,13 @@ Do not include any of the following in issues, pull requests or screenshots:
 - Add or preserve protocol test vectors when changing frame generation.
 - Keep all user-facing English strings in `translations/en.json`.
 - Additional translations are welcome.
+
+## Local software checks
+
+Run `python tests/run_tests.py` from the repository root. Each suite uses an
+isolated interpreter with lightweight Home Assistant/BLE stubs. These checks
+cover protocol handling, command sequencing, confirmation, reload and availability
+behavior; they do not replace hardware tests or a live Home Assistant check.
 
 ## Pull requests
 

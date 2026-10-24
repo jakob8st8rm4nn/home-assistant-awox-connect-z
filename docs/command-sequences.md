@@ -1,6 +1,6 @@
 # Command sequences
 
-This specification defines the target behavior of the AwoX/EGLO Connect.Z command pipeline. Commands are symbolic; protocol frames are documented in the [protocol reference](protocol.md).
+This specification describes the implemented behavior of the AwoX/EGLO Connect.Z command pipeline. Commands are symbolic; protocol frames are documented in the [protocol reference](protocol.md).
 
 ## Terms
 
@@ -49,11 +49,12 @@ The table shows the complete intended logical command sequence for an uninterrup
 
 Apply these rules before selecting a sequence:
 
-1. **UNKNOWN:** Reject new requests without queuing them.
+1. **UNKNOWN:** The pure planner rejects unknown state. Before submitting a new HA request, the entity may obtain a bounded initial 1911 status; no lamp control is sent until a valid state is available. This is not per-request readiness when state is already known.
 2. **OFF priority:** For a known state, normalize an explicit Power OFF or `Brightness = 0` to a pure Power OFF target. Discard every other target in that request, including Power ON, Color/CCT, Start Effect and Stop Effect. All other brightness cases refer to positive values.
 3. **Conflicts:** If OFF normalization does not apply, reject requests containing both Color and CCT or both Start Effect and Stop Effect. Send no command and do not execute a partial sequence.
 4. **Redundant Power ON:** When combined with positive Brightness, Color/CCT or Start Effect, discard the separate Power ON target. The remaining sequence already establishes or preserves ON. Keep Power ON when combined only with Stop Effect.
 5. **Redundant Stop Effect:** Color/CCT stops an active effect, so discard a separate Stop Effect target when combined with Color/CCT. In normal states without an active effect, ignore Stop Effect and process the remaining targets normally. Stored-effect recovery is handled separately below.
+
 - **Validation before planning:** Only after normalization and conflict validation may the sequencer plan recovery or a normal transition. A rejected request must not trigger a recovery `EFFECT STOP`.
 - **Request shape:** A normalized request contains at most one power target, one brightness target and one effect target. Resolve superseded values within the same category before sequence selection. The conflict rules concern contradictory targets within one request, not a newer request replacing an older one.
 
@@ -61,16 +62,16 @@ Apply these rules before selecting a sequence:
 
 ### Planner state
 
-- **Known state:** A state advertisement establishes a known planner state only when the information needed to select a sequence can be interpreted, including power and effect state or identity where applicable.
+- **Known state:** A valid state advertisement, successful 1911 group-confirmation result or explicit UNKNOWN-bootstrap result establishes known planner state only when power and effect state can be interpreted. Other 1911 notifications do not reconcile the planner.
 - **Unknown mode:** An unknown mode must not be treated as “no active effect”.
 - **UNKNOWN handling:** Uninterpretable required information makes the planner UNKNOWN; apply the abort rules under [Failure handling and cancellation](#failure-handling-and-cancellation).
-- **Persistence:** A known state does not expire merely because no newer advertisement has arrived.
-- **State updates:** Successful local writes update the assumed planner state; valid advertisements reconcile it with the reported state.
+- **Persistence:** A known state does not expire merely because no newer advertisement has arrived. Normal BLE disconnect/reconnect does not reset it to UNKNOWN. A newly created entity starts UNKNOWN until an authoritative state is applied.
+- **State updates:** Successful local writes update the assumed planner state; advertisements and selected 1911 confirmation/bootstrap results reconcile it outside a batch. Successful writes advance planning but do not by themselves complete a written HA request.
 - **Availability:** Availability is evaluated separately.
 
 ### Effect semantics and ordering
 
-- **Effect-start power completion:** Every actual Candle or Color Cycle start is followed by a mandatory power command, even if the assumed lamp state is already ON. In an uninterrupted start sequence this is `POWER ON`; a newer OFF target may replace the unsent finalizer with `POWER OFF`. A same-effect no-op creates no new obligation. `EFFECT STOP` alone does not create one.
+- **Effect-start power completion:** Every actual Candle or Color Cycle start is followed by a mandatory power command, including when already ON. In an uninterrupted start sequence use `POWER ON`. Once the group starts, a newer OFF request waits for the next group and cannot replace this finalizer. A same-effect no-op or effect stop creates no new power obligation.
 - **Effect identity:** `EFFECT START` starts the requested effect. “Same Effect” and “Different Effect” are classifications based on the currently active effect.
 - **Brightness and effects:** Brightness alone preserves an active effect. Starting that same effect together with brightness does not require a redundant `EFFECT START`. Starting a different effect, or an effect when none is active, follows the brightness finalization shown in the table.
 - **Color/CCT:** Color/CCT stops an active effect. Requests containing Color/CCT or Stop Effect do not implicitly restart the previous effect.
@@ -92,33 +93,61 @@ Apply these rules before selecting a sequence:
 ## Power finalization
 
 - **Trigger and next command:** A successful positive `BRIGHTNESS_ON` or actual `EFFECT START` creates a manager-owned obligation: the next physical command to that lamp must be a power command. No Color/CCT, effect, brightness, recovery stop or other non-power command may intervene.
-- **Power target:** Normally use `POWER ON`. If the latest accepted target requires OFF, use `POWER OFF` instead; an unsent ON finalizer may therefore be replaced by OFF.
+- **Power target:** Use the target of the running group. New requests received after its first command selection wait separately; they cannot replace a running ON finalizer with OFF.
 - **Finalizer completion:** A successful power write fulfills the obligation. Do not skip it merely because the assumed power state already matches the target.
 - **Generation tracking:** The manager tracks the originating brightness/effect-start generation and its unfinished finalization separately from replaceable target slots.
 - **Replanning:** Ordinary superseding, replanning or clearing unsent goals preserves this obligation. Clearing goals for replanning must remain distinct from aborting a transaction.
-- **Request completion:** A brightness/effect-start request is not successfully completed until its power finalizer and remaining requested steps succeed.
-- **Superseding requests:** A later accepted OFF request may provide the finalizer and supersede obsolete tails. Superseded requests may finish according to the normal superseding policy, but must not falsely confirm execution of discarded targets.
+- **Request completion:** A brightness/effect-start request is not successfully completed until its power finalizer and remaining requested steps succeed and the executed batch is status-confirmed.
+- **Superseding requests:** Before a group starts, latest-wins merging can replace pending targets. After it starts, preserve its complete remaining sequence, power obligations and confirmation; newer OFF and ON requests wait separately.
 - **Aborts:** Cancellation, terminal failure, UNKNOWN and unload follow [Failure handling and cancellation](#failure-handling-and-cancellation); they must not leave a deferred automatic power command behind.
 
 ## Command execution
 
 ### Latest request wins
 
-- **Pending steps:** Replace superseded unsent steps, including during Delay.
-- **In-flight writes:** A command already being written cannot be withdrawn.
-- **Finalization:** Preserve outstanding power finalization as specified above.
-- **No-command decisions:** Before deciding that no write is needed, account for pending, in-flight and finalization work.
-- **OFF requests:** An OFF request cancels older unsent ON targets even when the lamp is already OFF.
+- **Before first selection:** Replace superseded pending targets, including during connection preparation or an initial spacing wait.
+- **Running group:** From its first physical command selection through confirmation and any complete repeat, keep the accepted targets fixed. Finish the remaining sequence and required power finalizers before the next group.
+- **Waiting work:** Collect newer requests in separate power, brightness, appearance and effect slots. New values replace relevant older waiting values; preserve independent targets. OFF discards older waiting targets, and a newer static appearance replaces an older waiting effect goal.
+- **No unbounded FIFO:** Do not execute every intermediate request. Only the latest surviving waiting slots become the next group, retaining their request owners.
+- **Power OFF latency:** A newer OFF also waits for the running group, including any polls and repeat. It cannot interrupt a running finalizer.
+- **Completion:** Replacement of an unstarted waiting target is not an execution error or a status-confirmed write. A started group retains its own confirmation barrier. Waiting no-ops cannot complete merely from the running group's optimistic state.
+- **Failure:** Final unconfirmed outcome, session loss or ambiguous writes retain the conservative UNKNOWN policy: abort all still-pending work, including waiting requests. Never replay it automatically after recovery.
 
 ### Command spacing
 
 - **Responsibility and scope:** The sequencer determines command order; the manager enforces Delay between consecutive writes to the same lamp, within sequences, across requests and before finalizers.
+- **Native fades:** After Color, CCT or Brightness, add `1.25 × encoded transition time` to the configured same-lamp interval before the next control write, including mandatory power finalizers and later groups. Use the decisecond duration actually carried by the frame. No intermediate confirmation is required. A matching status does not release the next write before this spacing expires.
 - **Elapsed time:** Time already elapsed counts toward the interval: wait only for the remainder. Even a single-command sequence may require a wait after an earlier command.
 - **Serialization:** Writes to the same lamp must not overlap.
 - **Independent lamps:** Other lamps do not share this delay.
 - **No delay commands:** The sequencer does not generate delay commands.
 - **Measurement:** Measure Delay from completion of the previous successful GATT write to the start of the next GATT write, using a monotonic clock.
 - **Failed attempts:** For a failed or timed-out attempt, use its local completion time as the spacing reference for any subsequent attempt, including a retry. This timestamp does not imply receipt or execution by the lamp.
+
+## 1911 group confirmation
+
+Confirmation requires direct type `0x80`, matching mesh ID/MAC suffix and the current session. Mesh type `0x82` cannot confirm commands. Packet formats and status acceptance are specified in the [protocol reference](protocol.md#1911-direct-lamp-status).
+
+- **Scope:** Direct BLE connection to the configured lamp only. No mesh route selection, MQTT or advertisement-based command confirmation.
+- **Session initialization:** Initialize 1911 once per authenticated session as described in the [protocol reference](protocol.md#1911-direct-lamp-status). Do not add the lamp-command gap between authentication/notification operations.
+- **Write versus request success:** The manager processes each successful GATT write immediately, preserving its state-dependent planning and required power steps. A separate generation barrier holds written HA requests until confirmation. Every generation consumed by a physical power step within the frozen group is held. Requests received after the group starts wait separately, even when their power target matches a running finalizer.
+- **Batch boundary:** Freeze accepted intent at the first physical command selection, after connection preparation and spacing. Record successful logical writes, their generations and plaintext frames. Do not add newer waiting targets to this group.
+- **End target:** Derive goals from the actual encoded frames. OFF dominates earlier fields; Color Cycle removes static appearance goals. Numeric tolerance is one raw step, with circular hue comparison. New requests wait outside this goal. Evaluate waiting same-state no-ops only after the running group is confirmed, against the resulting state.
+- **Response window:** After the last group write, wait up to 250 ms for a matching status. If that last write is Color, CCT or Brightness, add `1.25 × encoded transition time`, measured from its write completion. Accept a valid fresh matching reply immediately, including during the fade allowance. Earlier fades already consumed their required spacing before subsequent writes; do not add their allowance again. With the default 0.2 s fade and 250 ms command interval, the next control is eligible after 500 ms; a final fading command has a 500 ms maximum automatic response window.
+- **Polls:** If not matched, send up to seven directed status queries, with 250 ms response windows. Mismatch and incomplete data do not trigger early resends. Poll writes are not lamp controls and do not inherit the configurable lamp-command gap.
+- **Repeat:** If still unmatched, repeat the entire immutable plaintext group once with the same session key. A newer waiting request does not invalidate or change this replay. Retain fade-aware control spacing, mandatory power steps and the same response/poll policy, recalculated from the new write times. The budget is separate from confirmed-non-delivery transport retries. Replay never calls semantic write completion again.
+- **New requests:** While a group runs or waits for confirmation, merge newer targets into separate latest-wins waiting slots. Preserve independent surviving slots and effect/power conflict rules. Promote waiting work only after the group finishes. Replaced waiting targets complete without a superseded error; this does not assert that they were executed. Explicit cancellation, session loss and terminal failures still abort as specified below.
+- **State sources:** Receive valid 1911 replies into the session store for group confirmation and UNKNOWN bootstrap only. Individual notifications never synchronize the HA display or planner, including after a completed group. Apply the selected successful group-confirmation result after the barrier, or explicitly apply the UNKNOWN-bootstrap result. Advertisements retain their normal state-update behavior outside active groups. No extra polling is introduced.
+- **Final failure:** After both sends remain unconfirmed, mark planner state UNKNOWN and fail pending requests, including newer requests if still pending. Never retain work for automatic later replay. A valid state advertisement or the result of a bounded initial-status query permits a new request.
+- **Session loss:** Invalidate old status waiters and stop the batch. Do not reconnect to replay an old group. Notification callbacks carry the authentication generation; old callbacks cannot populate a new session. Idle disconnect is held off during group execution/confirmation and restored afterward.
+- **Protocol limit:** Replies have no unique query identifier or trustworthy device measurement timestamp. Session and reception-time filtering reject old sessions/pre-write receptions but cannot prove which same-session query produced a delayed reply. A matching state is not proof of physical light output.
+
+### Native-effect replies and displayed appearance
+
+- **Intermediate cycle modes:** `0x04`/`0x05` retain Color Cycle identity with a CCT base; they cannot satisfy `effect=None` or Candle goals. Keep waiting inside the normal response window. Poll only when that window expires without a complete match.
+- **Dynamic hue:** Native-effect hue `0xFF` has no fixed angle and cannot satisfy a fixed hue goal. A Color-Cycle goal does not require a static appearance match; accepted field ranges are defined in the [protocol reference](protocol.md#brightness-hue-and-saturation-ranges).
+- **HA display:** The final successful 1911 group-confirmation reply updates power, brightness, effect and convertible color/CCT values, including native effects. Display values come from the reply, not the requested command values. Color Cycle appearance is a momentary sample, not a permanent color target. Hue `0xFF` does not overwrite the previous HS value. Other 1911 replies update neither display nor planner. Effect advertisements preserve HA color/CCT and color mode while still updating power, brightness and effect. The explicit UNKNOWN-bootstrap result uses that same appearance-preserving effect path.
+- **Confirmation is separate:** Retain appearance raw fields for diagnostics and any goals required by the encoded group, such as Color/CCT + Candle. The display policy does not remove or relax those goals.
 
 ## Failure handling and cancellation
 
@@ -137,7 +166,7 @@ Apply these rules before selecting a sequence:
 - **Ambiguous outcome:** A timeout or ambiguous write failure may occur even if the lamp received the command. Do not assume either the previous or requested state is confirmed.
 - **Abort policy:** Do not automatically retry: mark the planner UNKNOWN and abort all pending requests with an error, including newer requests accepted during the write.
 - **Uninterpretable advertisements:** The same UNKNOWN abort policy applies when required advertisement state cannot be interpreted.
-- **State recovery:** A suitable state advertisement permits new requests again; aborted requests are not retained or resumed. No request waits indefinitely for state recovery.
+- **State recovery:** A suitable state advertisement or explicit UNKNOWN-bootstrap result permits new requests again; aborted requests are not retained or resumed. No request waits indefinitely for state recovery.
 
 ### Cancellation and transaction aborts
 
@@ -147,11 +176,13 @@ Apply these rules before selecting a sequence:
 - **Newer requests:** Independent newer requests remain subject to normal generation handling; UNKNOWN aborts all pending requests.
 - **New transactions:** A new accepted request after recovery is planned from the available state as a new transaction.
 
-## Delay setting
+## Transition and delay settings
 
 | Setting | Default | Allowed range |
 | --- | --- | --- |
+| Default transition | 0.2 s | 0–30 s |
 | Minimum command interval | 250 ms | 0–2000 ms |
 
-- **Range:** The allowed range is inclusive. A value of **0 ms** disables intentional spacing; command order, write serialization and power finalization still apply.
+- **Default transition:** The options range applies to the configured default. An explicit Home Assistant `transition` overrides it; the protocol encodes fades in deciseconds. This option does not impose a separate 30-second clamp on explicit action values.
+- **Command-interval range:** The allowed range is inclusive. A value of **0 ms** disables the base command interval; the additional fade allowance still applies after Color, CCT and Brightness. Command order, write serialization and power finalization remain unchanged.
 - **Existing settings:** Preserve saved values within the allowed range, including values below 250 ms, and show them consistently in the options UI.

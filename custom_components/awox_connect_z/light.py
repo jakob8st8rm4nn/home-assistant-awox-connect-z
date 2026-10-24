@@ -31,8 +31,6 @@ from .client import AwoxConnectZClient
 from .command_executor import CommandExecutionFailed, CommandExecutor
 from .command_manager import CommandManager
 from .command_sequences import (
-    CommandKind,
-    PlannedCommand,
     PlannerState,
     SequenceConflictError,
     TargetState,
@@ -42,8 +40,6 @@ from .const import (
     CONF_COMMAND_INTERVAL_MS,
     DEFAULT_COMMAND_INTERVAL_MS,
     DOMAIN,
-    EFFECT_CANDLE,
-    EFFECT_COLOR_CYCLE,
     MAX_COLOR_TEMP_KELVIN,
     MAX_COMMAND_INTERVAL_MS,
     MIN_COLOR_TEMP_KELVIN,
@@ -134,7 +130,9 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
         self._command_worker: asyncio.Task[None] | None = None
         self._entity_unloading = False
+        self._last_ble_connected = client.connected
         self._request_waiters: dict[int, asyncio.Future[None]] = {}
+        self._initial_status_lock = asyncio.Lock()
 
         self._attr_unique_id = self._mac.replace(":", "").lower()
         self._attr_is_on = False
@@ -208,6 +206,12 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 self._async_availability_changed
             )
         )
+        self._last_ble_connected = self._client.connected
+        self.async_on_remove(
+            self._client.async_add_diagnostic_listener(self._async_connection_changed)
+        )
+        # 1911 replies remain in the session store for confirmation/UNKNOWN lookup.
+        # Only their explicit successful result is applied, never every notification.
         self._entity_unloading = False
         self.async_on_remove(self._async_cancel_command_worker)
 
@@ -215,14 +219,37 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             self._async_apply_advertisement_state(self._client.advertisement_state)
 
     @callback
-    def _async_availability_changed(self, _available: bool) -> None:
+    def _async_availability_changed(self, available: bool) -> None:
+        self._last_ble_connected = self._client.connected
+        if self._executor.busy and available:
+            return
         self.async_write_ha_state()
+
+    @callback
+    def _async_connection_changed(self) -> None:
+        """Publish link changes even while light availability stays true."""
+        connected = self._client.connected
+        if connected != self._last_ble_connected:
+            self._last_ble_connected = connected
+            if self._executor.busy:
+                return
+            self.async_write_ha_state()
 
     @callback
     def _async_apply_advertisement_state(
         self, state: AwoxAdvertisementState
     ) -> None:
-        """Apply authoritative lamp state and reconcile the command planner."""
+        self._async_apply_lamp_state(state)
+
+    @callback
+    def _async_apply_lamp_state(
+        self, state: AwoxAdvertisementState, *, confirmed_group: bool = False
+    ) -> None:
+        """Apply a received lamp state outside a physical/confirmation batch."""
+        if self._executor.busy:
+            # Neither advertisements nor 1911 intermediate replies may replan an
+            # executing group. A matching end status is applied after the barrier.
+            return
         self._attr_is_on = state.is_on
         self._attr_brightness = state.brightness
 
@@ -231,23 +258,26 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         else:
             self._set_effect_state_unknown()
 
-        if state.is_color_mode:
-            if (
-                state.hue_degrees is not None
-                and state.saturation_percent is not None
-            ):
-                self._attr_hs_color = (
-                    float(state.hue_degrees),
-                    float(state.saturation_percent),
-                )
-            self._attr_color_mode = ColorMode.HS
-        else:
-            if state.color_temp_kelvin is not None:
-                self._attr_color_temp_kelvin = max(
-                    MIN_COLOR_TEMP_KELVIN,
-                    min(MAX_COLOR_TEMP_KELVIN, state.color_temp_kelvin),
-                )
-            self._attr_color_mode = ColorMode.COLOR_TEMP
+        # Only a confirmed group's final reply may update effect appearance.
+        # Unsolicited effect samples continue to preserve HA's last color/CCT.
+        if confirmed_group or state.effect not in NATIVE_EFFECTS:
+            if state.is_color_mode:
+                if (
+                    state.hue_degrees is not None
+                    and state.saturation_percent is not None
+                ):
+                    self._attr_hs_color = (
+                        float(state.hue_degrees),
+                        float(state.saturation_percent),
+                    )
+                self._attr_color_mode = ColorMode.HS
+            else:
+                if state.color_temp_kelvin is not None:
+                    self._attr_color_temp_kelvin = max(
+                        MIN_COLOR_TEMP_KELVIN,
+                        min(MAX_COLOR_TEMP_KELVIN, state.color_temp_kelvin),
+                    )
+                self._attr_color_mode = ColorMode.COLOR_TEMP
 
         failed = self._manager.set_state(planner_state_from_advertisement(state))
         if failed:
@@ -261,6 +291,14 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         self._resolve_completed_waiters()
         self._ensure_command_worker()
         self.async_write_ha_state()
+
+    @callback
+    def _async_apply_status_1911(self, state, *, confirmed_group: bool = False) -> None:
+        """Apply an explicit group-confirmation or UNKNOWN-bootstrap result."""
+        if not self._executor.busy:
+            self._async_apply_lamp_state(
+                state.as_lamp_state(), confirmed_group=confirmed_group
+            )
 
     def _set_effect_state_known(self, effect: str | None) -> None:
         self._effect_state_known = True
@@ -360,7 +398,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 return
 
             try:
-                command = await self._executor.async_execute_next()
+                commands = await self._executor.async_execute_group()
             except asyncio.CancelledError:
                 raise
             except CommandExecutionFailed as err:
@@ -383,44 +421,29 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                 self._fail_waiters(failed, wrapped)
                 return
 
-            if command is None:
+            if not commands:
                 self._resolve_completed_waiters()
                 if self._manager.peek_next_command() is None:
                     return
                 continue
 
-            self._apply_successful_command(command)
+            if self._executor.last_confirmed_state is not None:
+                self._async_apply_status_1911(
+                    self._executor.last_confirmed_state, confirmed_group=True
+                )
             self._resolve_completed_waiters()
-
-    @callback
-    def _apply_successful_command(self, command: PlannedCommand) -> None:
-        """Optimistically reflect one confirmed logical write in HA state."""
-        if command.kind is CommandKind.POWER_ON:
-            self._attr_is_on = True
-        elif command.kind is CommandKind.POWER_OFF:
-            self._attr_is_on = False
-            self._set_effect_state_known(None)
-        elif command.kind is CommandKind.BRIGHTNESS_ON:
-            self._attr_brightness = int(command.value)
-            self._attr_is_on = True
-        elif command.kind is CommandKind.COLOR:
-            hue, saturation = command.value
-            self._attr_hs_color = (float(hue), float(saturation))
-            self._attr_color_mode = ColorMode.HS
-            self._set_effect_state_known(None)
-        elif command.kind is CommandKind.CCT:
-            self._attr_color_temp_kelvin = int(command.value)
-            self._attr_color_mode = ColorMode.COLOR_TEMP
-            self._set_effect_state_known(None)
-        elif command.kind is CommandKind.EFFECT_START:
-            self._set_effect_state_known(str(command.value))
-        elif command.kind is CommandKind.EFFECT_STOP:
-            self._set_effect_state_known(None)
-
-        self.async_write_ha_state()
 
     async def _async_submit_target(self, target: TargetState) -> None:
         """Submit one HA request and wait until its generation completes."""
+        if self._entity_unloading:
+            raise HomeAssistantError("AwoX entity is unloading")
+        if not self._manager.state.known:
+            async with self._initial_status_lock:
+                if not self._manager.state.known:
+                    state = await self._executor.async_initial_status()
+                    self._async_apply_status_1911(state)
+        if self._entity_unloading:
+            raise HomeAssistantError("AwoX entity unloaded during initial-state lookup")
         previous_generation = self._manager.request_generation
         try:
             self._manager.submit(target)

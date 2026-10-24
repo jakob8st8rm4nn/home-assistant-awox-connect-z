@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .const import AWOX_COMPANY_ID, EFFECT_CANDLE, EFFECT_COLOR_CYCLE
+from .const import (CANDLE_STATUS_MODES, COLOR_CYCLE_STATUS_MODES,
+                    STATUS_EFFECTS)
 
 # Connect.Z manufacturer-data prefix used by the supported device profile.
 # Bytes 2-5 contain the lower four MAC bytes in reverse order.
@@ -67,20 +68,22 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
         [2:5]   lower MAC bytes, little-endian
         [6:7]   Connect.Z marker 03 00
         [9:10]  16-bit mesh id, little-endian
-        [11]    hardware-confirmed mode values:
+        [11]    shared mode mapping (04/05 measured through 1911 only):
                 00=off/white, 01=on/white,
                 02=off/color, 03=on/static color,
+                04=off/white with cycle bit, 05=on/white with cycle bit,
                 06=off/color cycle preset, 07=on/color cycle,
                 10=off/candle preset on white/CCT,
                 11=on/candle on white/CCT,
                 12=off/candle preset on color,
                 13=on/candle on color
-        [12]    brightness, 0x00..0xFE
+        [12]    brightness raw, 0x00..0xFF
         [13:14] white color temperature in mireds, little-endian
         [15]    hue
         [16]    saturation
 
-    Short six-byte base advertisements do not contain state and are ignored.
+    Modes 04/05 were measured through 1911, not advertisements; the same
+    mapping is used here if received. Short six-byte advertisements have no state.
     """
     if len(data) < 17:
         return None
@@ -89,40 +92,37 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
 
     mesh_id = data[9] | (data[10] << 8)
     mode = data[11]
-    is_on = bool(mode & 0x01)
     is_color_mode = bool(mode & 0x02)
-    # Hardware-confirmed complete mode values on EGLO-ZM-RGB-TW firmware
-    # 3.0.2.  Decode effects only from the confirmed combinations instead of
+    # Dynamic native-effect hues may contain FF. Do not reject their power,
+    # brightness and effect fields; no fixed angle is derived from hue FF.
+    if (is_color_mode and data[15] == 0xFF
+            and mode not in (*COLOR_CYCLE_STATUS_MODES, *CANDLE_STATUS_MODES)):
+        return None
+    # Complete combinations observed on EGLO-ZM-RGB-TW firmware 3.0.2,
+    # including 1911 transitions 04/05. Decode only these combinations instead of
     # treating arbitrary bit combinations as authoritative.  This matters
     # because the effect state also controls which stop command is selected.
-    if mode in (0x06, 0x07):
-        # 0x06 is the same native color-cycle state while power is off.
-        # The lamp remembers the effect and starts it on the next power-on.
-        effect = EFFECT_COLOR_CYCLE
-        effect_state_known = True
-    elif mode in (0x10, 0x11, 0x12, 0x13):
-        # Candle preserves the underlying white/CCT or HS appearance. 0x10/0x12
-        # are the corresponding remembered-effect states while power is off.
-        effect = EFFECT_CANDLE
-        effect_state_known = True
-    elif mode in (0x00, 0x01, 0x02, 0x03):
-        effect = None
-        effect_state_known = True
-    else:
-        effect = None
-        effect_state_known = False
+    return lamp_state_from_fields(
+        mesh_id=mesh_id, mode=mode, brightness=data[12],
+        mired=data[13] | (data[14] << 8), hue=data[15], saturation=data[16],
+    )
 
-    brightness_raw = data[12]
-    # Connect.Z uses 0xFE as the confirmed full-scale brightness value.
-    brightness = round(min(brightness_raw, 0xFE) * 255 / 0xFE)
 
+def lamp_state_from_fields(*, mesh_id: int, mode: int, brightness: int,
+                           mired: int | None, hue: int | None,
+                           saturation: int | None) -> AwoxAdvertisementState:
+    """Normalize decoded fields; source-specific validation stays in the parsers."""
+    is_on, is_color_mode = bool(mode & 1), bool(mode & 2)
+    effect, effect_state_known = STATUS_EFFECTS.get(mode), mode in STATUS_EFFECTS
+    brightness_raw = brightness
     if is_color_mode:
-        hue_raw = data[15]
-        saturation_raw = data[16]
-        # Connect.Z advertisements use an 8-bit hue wheel and 0xFE as the
-        # confirmed full-saturation value. Preserve those scales for HA.
-        hue_degrees = (hue_raw * 360.0 / 255.0) % 360.0
-        saturation_percent = min(saturation_raw, 0xFE) * 100.0 / 0xFE
+        hue_raw = hue
+        saturation_raw = saturation
+        # Use the same 254-position hue circle as control frames; received
+        # hue 0xFE represents the wrap endpoint and maps to zero degrees.
+        # Preserve received raw bytes.
+        hue_degrees = (hue_raw * 360.0 / 254.0) % 360.0 if hue_raw is not None and hue_raw <= 254 else None
+        saturation_percent = saturation_raw * 100.0 / 255.0 if saturation_raw is not None else None
         color_temp_mired = None
         color_temp_kelvin = None
     else:
@@ -130,8 +130,7 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
         saturation_raw = None
         hue_degrees = None
         saturation_percent = None
-        mired = data[13] | (data[14] << 8)
-        if mired in (0, 0xFFFF):
+        if mired in (None, 0, 0xFFFF):
             color_temp_mired = None
             color_temp_kelvin = None
         else:

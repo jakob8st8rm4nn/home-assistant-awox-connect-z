@@ -103,7 +103,6 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
     ) -> None:
         self.entity_description = description
         self._client = client
-        self._device = device
         self._mesh_id = int(device["mesh_id"])
         self._restored_last_connection: str | None = None
         self._last_published_value: Any = _UNSET
@@ -115,7 +114,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
 
         if description.key == "bluetooth_status":
             self._attr_options = [
-                "connected", "visible", "unreachable"
+                "connected", "visible", "recently_connected", "unreachable"
             ]
 
         device_name = str(device.get("name") or f"AwoX {mac[-8:]}")
@@ -151,9 +150,10 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
             "mesh_id_status": self._client.mesh_id_status,
         }
 
-    def _publish_signature(self) -> Any:
+    def _publish_signature(self, value: Any = _UNSET) -> Any:
         """Return state plus attributes that matter for HA publication."""
-        value = self.native_value
+        if value is _UNSET:
+            value = self.native_value
         if self.entity_description.key != "mesh_id":
             return value
         attributes = self.extra_state_attributes or {}
@@ -172,7 +172,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         if key == "mesh_id":
             return f"0x{self._mesh_id:04X}"
         if key == "current_bluetooth_source":
-            return self._client.current_bluetooth_source
+            return self._client.last_bluetooth_source
         if key == "last_connection":
             if self._client.has_live_last_connection_result:
                 return self._client.last_connection_source
@@ -206,7 +206,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
     def _async_diagnostics_changed(self) -> None:
         """Publish only meaningful changes for this diagnostic entity."""
         value = self.native_value
-        signature = self._publish_signature()
+        signature = self._publish_signature(value)
         previous = self._last_published_value
         if previous is not _UNSET and signature == previous:
             return

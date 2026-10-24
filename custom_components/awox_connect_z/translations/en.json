@@ -190,14 +190,15 @@
         "state": {
           "connected": "Connected",
           "visible": "Visible",
-          "unreachable": "Unreachable"
+          "unreachable": "Unreachable",
+          "recently_connected": "Recently connected"
         }
       },
       "mesh_id": {
         "name": "Mesh ID"
       },
       "current_bluetooth_source": {
-        "name": "Current Bluetooth Source"
+        "name": "Last Bluetooth Source"
       },
       "last_connection": {
         "name": "Last Connection"
