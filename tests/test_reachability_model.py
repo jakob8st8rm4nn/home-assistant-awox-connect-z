@@ -48,7 +48,7 @@ class ReachabilityModel(unittest.IsolatedAsyncioTestCase):
             c = await self.reload(f)
             self.assertEqual(c.bluetooth_status, 'recently_connected')
             self.assertTrue(c.available); self.assertEqual(c.last_seen, seen)
-            self.assertEqual(c._last_liveness, 100)
+            self.assertEqual(c._availability.connection_time, 100)
             self.now = 110
             self.assertEqual(c.bluetooth_status, 'unreachable'); self.assertFalse(c.available)
 
@@ -58,7 +58,7 @@ class ReachabilityModel(unittest.IsolatedAsyncioTestCase):
             for t in (102, 105, 109, 110, 115):
                 self.now = t; c = await self.reload(f)
                 self.assertEqual(c.available, t < 110)
-                self.assertEqual(c._last_liveness, 100)
+                self.assertEqual(c._availability.connection_time, 100)
 
     async def test_reload_live_connection_captures_final_known_connection(self):
         async with self.runtime() as f:
@@ -71,7 +71,7 @@ class ReachabilityModel(unittest.IsolatedAsyncioTestCase):
             c = await self.reload(f)
             self.assertFalse(c.connected)
             self.assertEqual(c.bluetooth_status, 'recently_connected')
-            self.assertEqual(c._last_liveness, 120)
+            self.assertEqual(c._availability.connection_time, 120)
             self.now = 130; self.assertFalse(c.available)
 
     async def test_new_timeout_uses_original_age(self):
@@ -91,7 +91,7 @@ class ReachabilityModel(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError): await opt.setup.async_setup_entry(f.hass, f.entry)
             f.fail_forward = False
             c = await self.start(f)
-            self.assertEqual(c._last_liveness, 100); self.assertTrue(c.available)
+            self.assertEqual(c._availability.connection_time, 100); self.assertTrue(c.available)
 
     async def test_failed_unload_keeps_live_instance(self):
         async with self.runtime() as f:
@@ -130,7 +130,7 @@ class ReachabilityModel(unittest.IsolatedAsyncioTestCase):
             self.now = 115; self.assertEqual(c.bluetooth_status, 'unreachable')
             c.async_note_bluetooth_liveness(115)
             self.assertEqual(c.bluetooth_status, 'visible')
-            self.assertEqual(c._last_liveness, 105)
+            self.assertEqual(c._availability.connection_time, 105)
 
     async def test_last_advertisement_source_is_independent_of_connection_proxy(self):
         async with self.runtime() as f:
@@ -170,7 +170,7 @@ class ReachabilityModel(unittest.IsolatedAsyncioTestCase):
             self.now = 105
             self.info = types.SimpleNamespace(time=105, source='new-proxy', rssi=-50)
             c = await self.start(f)
-            self.assertEqual(c._last_seen_service_time, 105)
+            self.assertEqual(c._availability.advertisement_time, 105)
             self.assertEqual(c.last_bluetooth_source_id, 'new-proxy')
             self.now = 115; self.assertFalse(c.available)
 

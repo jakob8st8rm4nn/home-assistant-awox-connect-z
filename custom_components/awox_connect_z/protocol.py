@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .const import (
-    CANDLE_STATUS_MODES,
-    COLOR_CYCLE_STATUS_MODES,
-    SUPPORTED_STATUS_MODES,
+    DEFAULT_TRANSITION,
+    STATUS_EFFECTS,
     MAX_COLOR_TEMP_KELVIN,
     MAX_MESH_ID,
     MESH_CREDENTIAL_MAX_BYTES,
     MIN_COLOR_TEMP_KELVIN,
     MIN_MESH_ID,
 )
+
+
+_BRIGHTNESS_TRANSITION_OFFSET = 9
+_APPEARANCE_TRANSITION_OFFSET = 10
 
 
 def fit16(value: bytes) -> bytes:
@@ -38,13 +43,18 @@ def aes_encrypt_reversed(key: bytes, value: bytes) -> bytes:
     return encryptor.update(value[::-1])[::-1]
 
 
+def _mesh_credential_xor(mesh_name: bytes, mesh_password: bytes) -> bytes:
+    """Combine padded mesh credentials for login and session-key derivation."""
+    return bytes(
+        a ^ b for a, b in zip(fit16(mesh_name), fit16(mesh_password), strict=True)
+    )
+
+
 def make_pair_packet(
     mesh_name: bytes, mesh_password: bytes, session_random: bytes
 ) -> bytes:
     """Build the 17-byte login packet written to UUID 1914."""
-    mixed = bytes(
-        a ^ b for a, b in zip(fit16(mesh_name), fit16(mesh_password), strict=True)
-    )
+    mixed = _mesh_credential_xor(mesh_name, mesh_password)
     encrypted = aes_encrypt_reversed(session_random.ljust(16, b"\x00"), mixed)
     return b"\x0c" + session_random + encrypted[:8]
 
@@ -56,9 +66,7 @@ def make_session_key(
     response_random: bytes,
 ) -> bytes:
     """Build the per-connection session key after a successful 0x0D login."""
-    mixed = bytes(
-        a ^ b for a, b in zip(fit16(mesh_name), fit16(mesh_password), strict=True)
-    )
+    mixed = _mesh_credential_xor(mesh_name, mesh_password)
     return aes_encrypt_reversed(mixed, session_random + response_random)
 
 
@@ -69,7 +77,7 @@ def encrypt_command(session_key: bytes, plain16: bytes) -> bytes:
     return b"\x00" + aes_encrypt_reversed(session_key, plain16)
 
 
-def crc8_awox(data: bytes) -> int:
+def crc8_awox(data: bytes | bytearray) -> int:
     """CRC-8 used as byte 0 in Connect.Z command blocks."""
     crc = 0
     for byte in data:
@@ -90,15 +98,23 @@ def finalize_block(block: bytearray) -> bytes:
     end = 2 + length
     if end > 16:
         raise ValueError(f"Invalid Connect.Z length marker 0x{length:02X}")
-    block[0] = crc8_awox(bytes(block[1:end]))
+    block[0] = crc8_awox(block[1:end])
     return bytes(block)
 
 
 def _transition_ds(seconds: float | int | None) -> int:
     """Convert HA seconds to Zigbee transition time in deciseconds."""
     if seconds is None:
-        seconds = 0.2
+        seconds = DEFAULT_TRANSITION
     return max(0, min(0xFFFF, round(float(seconds) * 10.0)))
+
+
+def encoded_transition_seconds(
+    frame: bytes, *, layout: Literal["brightness", "appearance"],
+) -> float:
+    """Read the encoded fade duration; appearance covers HS color and CCT."""
+    offset = _BRIGHTNESS_TRANSITION_OFFSET if layout == "brightness" else _APPEARANCE_TRANSITION_OFFSET
+    return int.from_bytes(frame[offset:offset + 2], "little") / 10
 
 
 def _put_u16_le(block: bytearray, offset: int, value: int) -> None:
@@ -128,23 +144,23 @@ def make_power(on: bool, *, mesh_id: int) -> bytes:
 
 
 def make_brightness(
-    level: int, transition: float = 0.2, *, mesh_id: int
+    level: int, transition: float = DEFAULT_TRANSITION, *, mesh_id: int
 ) -> bytes:
     """Brightness 1..255, addressed to one device."""
-    level = max(1, min(255, int(level)))
+    level = ha_brightness_to_device(level)
     block = bytearray.fromhex(
         "00 0c 00 00 01 08 00 04 00 02 00 00 00 00 00 00"
     )
     _put_destination(block, mesh_id)
     block[8] = level
-    _put_u16_le(block, 9, _transition_ds(transition))
+    _put_u16_le(block, _BRIGHTNESS_TRANSITION_OFFSET, _transition_ds(transition))
     return finalize_block(block)
 
 
 def make_hs_color(
     hue_degrees: float,
     saturation_percent: float,
-    transition: float = 0.2,
+    transition: float = DEFAULT_TRANSITION,
     *,
     mesh_id: int,
 ) -> bytes:
@@ -159,28 +175,24 @@ def make_hs_color(
     )
     _put_destination(block, mesh_id)
     block[8] = hue
-    block[9] = max(0, min(255, saturation))
-    _put_u16_le(block, 10, _transition_ds(transition))
+    block[9] = saturation
+    _put_u16_le(block, _APPEARANCE_TRANSITION_OFFSET, _transition_ds(transition))
     return finalize_block(block)
 
 
 def make_color_temp_kelvin(
-    kelvin: int, transition: float = 0.2, *, mesh_id: int
+    kelvin: int, transition: float = DEFAULT_TRANSITION, *, mesh_id: int
 ) -> bytes:
     """Color-temperature command addressed to one device."""
     kelvin = max(MIN_COLOR_TEMP_KELVIN, min(MAX_COLOR_TEMP_KELVIN, int(kelvin)))
     mired = round(1_000_000 / kelvin)
-    mired = max(
-        round(1_000_000 / MAX_COLOR_TEMP_KELVIN),
-        min(round(1_000_000 / MIN_COLOR_TEMP_KELVIN), mired),
-    )
 
     block = bytearray.fromhex(
         "00 0a 00 00 01 00 03 0a 00 00 02 00 00 00 00 00"
     )
     _put_destination(block, mesh_id)
     _put_u16_le(block, 8, mired)
-    _put_u16_le(block, 10, _transition_ds(transition))
+    _put_u16_le(block, _APPEARANCE_TRANSITION_OFFSET, _transition_ds(transition))
     return finalize_block(block)
 
 
@@ -247,13 +259,13 @@ def parse_status_1911(session_key: bytes, payload: bytes) -> dict:
     if len(payload) != 20 or payload[0] not in (0x80, 0x82) or payload[19] != 0x60:
         raise ValueError("Unsupported 1911 envelope")
     block = aes_decrypt_reversed(session_key, payload[1:17])
-    if block[5:7] != bytes.fromhex("9620") or block[12] not in SUPPORTED_STATUS_MODES:
+    if block[5:7] != b"\x96\x20" or block[12] not in STATUS_EFFECTS:
         raise ValueError("Unsupported 1911 state")
     # Color Cycle can report FF as a dynamic hue. Preserve native-effect
     # packets (including Candle) without treating FF as a static color angle.
     # White-mode color bytes remain placeholders; static HS still rejects FF.
     if (block[12] & 0x02 and payload[17] == 0xFF
-            and block[12] not in (*COLOR_CYCLE_STATUS_MODES, *CANDLE_STATUS_MODES)):
+            and STATUS_EFFECTS.get(block[12]) is None):
         raise ValueError("Unsupported 1911 hue FF in static color mode")
     mesh_id = int.from_bytes(block[:2], "little")
     if not is_valid_device_mesh_id(mesh_id):

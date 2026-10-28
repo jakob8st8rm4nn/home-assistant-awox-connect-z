@@ -23,8 +23,6 @@ CONF_MAX_CONCURRENT_COMMANDS = "max_concurrent_commands"
 CONF_AVAILABILITY_TIMEOUT = "availability_timeout"
 CONF_COMMAND_INTERVAL_MS = "command_interval_ms"
 
-DEFAULT_NAME = "AwoX Connect.Z"
-
 # Shared Home Assistant runtime data key for serializing new BLE connection
 # establishment across all loaded AwoX config entries.
 DATA_RUNTIME_CONNECT_LOCK = "_runtime_connect_lock"
@@ -166,12 +164,12 @@ STATUS_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d1911"
 # 0x04/0x05 were observed through 1911 during Color Cycle -> CCT transitions.
 COLOR_CYCLE_STATUS_MODES = (0x04, 0x05, 0x06, 0x07)
 CANDLE_STATUS_MODES = (0x10, 0x11, 0x12, 0x13)
-SUPPORTED_STATUS_MODES = (0x00, 0x01, 0x02, 0x03, *COLOR_CYCLE_STATUS_MODES, *CANDLE_STATUS_MODES)
 STATUS_EFFECTS = {
     **dict.fromkeys((0x00, 0x01, 0x02, 0x03)),
     **dict.fromkeys(COLOR_CYCLE_STATUS_MODES, EFFECT_COLOR_CYCLE),
     **dict.fromkeys(CANDLE_STATUS_MODES, EFFECT_CANDLE),
 }
+SUPPORTED_STATUS_MODES = tuple(STATUS_EFFECTS)
 
 
 

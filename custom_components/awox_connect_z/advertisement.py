@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .const import (CANDLE_STATUS_MODES, COLOR_CYCLE_STATUS_MODES,
-                    STATUS_EFFECTS)
+from .const import STATUS_EFFECTS
 
 # Connect.Z manufacturer-data prefix used by the supported device profile.
 # Bytes 2-5 contain the lower four MAC bytes in reverse order.
@@ -96,7 +95,7 @@ def parse_awox_advertisement(data: bytes) -> AwoxAdvertisementState | None:
     # Dynamic native-effect hues may contain FF. Do not reject their power,
     # brightness and effect fields; no fixed angle is derived from hue FF.
     if (is_color_mode and data[15] == 0xFF
-            and mode not in (*COLOR_CYCLE_STATUS_MODES, *CANDLE_STATUS_MODES)):
+            and STATUS_EFFECTS.get(mode) is None):
         return None
     # Complete combinations observed on EGLO-ZM-RGB-TW firmware 3.0.2,
     # including 1911 transitions 04/05. Decode only these combinations instead of

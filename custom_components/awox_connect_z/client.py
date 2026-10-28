@@ -24,9 +24,11 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
+from .diagnostics import build_client_diagnostics
+from .availability import AvailabilityState, AvailabilityEvidence
 from .advertisement import AwoxAdvertisementState
 from .status_1911 import Status1911Store
-from .command_confirmation import CommandConfirmation, ConfirmationSuperseded
+from .command.confirmation import CommandConfirmation, ConfirmationSuperseded
 from .const import (
     AUTH_RESPONSE_SETTLE_SECONDS,
     AVAILABILITY_MIN_WAIT_SECONDS,
@@ -180,7 +182,7 @@ class AwoxConnectZClient:
         ] = set()
 
         self._available = False
-        self._last_liveness: float | None = None
+        self._availability = AvailabilityState()
         self._availability_task: asyncio.Task[None] | None = None
         self._availability_wakeup = asyncio.Event()
         self._availability_listeners: set[Callable[[bool], None]] = set()
@@ -188,17 +190,6 @@ class AwoxConnectZClient:
         self._diagnostic_listeners: set[Callable[[], None]] = set()
         self._last_connection_source: str | None = None
         self._last_connection_observed = False
-        self._last_seen_service_time: float | None = None
-        self._last_seen_wallclock: datetime | None = None
-        self._last_advertisement_source: str | None = None
-        self._last_advertisement_rssi: int | None = None
-        # During one HA publication, availability and Bluetooth status must be
-        # derived from the exact same reachability snapshot.  Without this
-        # short-lived cache, the timeout can expire between two entity reads.
-        self._reachability_snapshot_active = False
-        self._reachability_snapshot_status: str | None = None
-        # Availability and diagnostics derive from the same two evidence times.
-        # _available stores only the value last published to entity listeners.
 
     @callback
     def _record_error(
@@ -323,17 +314,13 @@ class AwoxConnectZClient:
         return False if self._closed else self._is_available_status(self.bluetooth_status)
 
     def _is_available_status(self, status: str | None) -> bool:
-        """Map a reachability status to availability for reads and publication."""
-        return not self._closed and status in (
-            "connected", "visible", "recently_connected"
-        )
+        return not self._closed and AvailabilityState.is_available(status)
 
     def _latest_service_info(self) -> bluetooth.BluetoothServiceInfoBleak | None:
         """Return Home Assistant's current best advertisement for this lamp."""
-        service_info = bluetooth.async_last_service_info(
+        return bluetooth.async_last_service_info(
             self.hass, self.mac, connectable=False
         )
-        return service_info
 
     def bluetooth_source_name(self, source: str | None) -> str | None:
         """Resolve a Bluetooth source MAC/ID to the scanner's friendly name."""
@@ -351,43 +338,16 @@ class AwoxConnectZClient:
     def signal_strength(self) -> int | None:
         """Return RSSI from the last known Bluetooth advertisement."""
         self._refresh_last_seen_from_ha()
-        return self._last_advertisement_rssi
+        return self._availability.rssi
 
     @callback
     def _async_update_last_seen(
-        self,
-        seen_time: float,
-        *,
-        source: str | None = None,
-        rssi: int | None = None,
+        self, seen_time: float, *, source: str | None = None, rssi: int | None = None
     ) -> bool:
-        """Cache the newest advertisement timestamp, source and RSSI."""
-        seen_time = float(seen_time)
-        if (
-            self._last_seen_service_time is not None
-            and seen_time < self._last_seen_service_time
-        ):
-            return False
-
-        changed = False
-        if self._last_seen_service_time != seen_time:
-            # BluetoothServiceInfoBleak.time uses the event loop's monotonic clock.
-            # Convert it once when HA reports a newer packet instead of recalculating
-            # it on every entity read, which can otherwise introduce tiny jitter.
-            age = max(0.0, time.monotonic() - seen_time)
-            self._last_seen_service_time = seen_time
-            self._last_seen_wallclock = dt_util.utcnow() - timedelta(seconds=age)
-            changed = True
-
-        # Source and RSSI are historical advertisement diagnostics. They do not
-        # expire with reachability and are never replaced by a connection proxy.
-        if source is not None and source != self._last_advertisement_source:
-            self._last_advertisement_source = str(source)
-            changed = True
-        if rssi is not None and int(rssi) != self._last_advertisement_rssi:
-            self._last_advertisement_rssi = int(rssi)
-            changed = True
-        return changed
+        return self._availability.note_advertisement(
+            seen_time, source=source, rssi=rssi,
+            clock=time.monotonic, utcnow=dt_util.utcnow,
+        )
 
     def _refresh_last_seen_from_ha(self) -> bool:
         """Refresh cached advertisement history from HA's Bluetooth manager."""
@@ -396,7 +356,7 @@ class AwoxConnectZClient:
             return False
 
         seen_time = float(service_info.time)
-        same_packet_time = self._last_seen_service_time == seen_time
+        same_packet_time = self._availability.advertisement_time == seen_time
         # A live per-packet callback is the authoritative source for which proxy
         # actually delivered an equal-timestamp packet. HA's cached "best" service
         # info may choose a different proxy for that same timestamp, so use it only
@@ -404,13 +364,13 @@ class AwoxConnectZClient:
         source = (
             str(service_info.source)
             if service_info.source is not None
-            and (not same_packet_time or self._last_advertisement_source is None)
+            and (not same_packet_time or self._availability.source is None)
             else None
         )
         rssi = (
             int(service_info.rssi)
             if service_info.rssi is not None
-            and (not same_packet_time or self._last_advertisement_rssi is None)
+            and (not same_packet_time or self._availability.rssi is None)
             else None
         )
         return self._async_update_last_seen(
@@ -423,67 +383,32 @@ class AwoxConnectZClient:
     def last_seen(self) -> datetime | None:
         """Return the stable wall-clock time of HA's newest advertisement."""
         self._refresh_last_seen_from_ha()
-        return self._last_seen_wallclock
+        return self._availability.last_seen
 
     def _derive_bluetooth_status(self) -> str | None:
-        """Derive one reachability result from one monotonic-time snapshot."""
-        if self.connected:
-            return "connected"
-
-        self._refresh_last_seen_from_ha()
-        now = time.monotonic()
-        advertisement_fresh = (
-            self._last_seen_service_time is not None
-            and now - self._last_seen_service_time < self.availability_timeout
+        connected = self.connected
+        if not connected:
+            self._refresh_last_seen_from_ha()
+        return self._availability.status(
+            time.monotonic(), self.availability_timeout, connected=connected
         )
-        connection_fresh = (
-            self._last_liveness is not None
-            and now - self._last_liveness < self.availability_timeout
-        )
-
-        if connection_fresh and (
-            not advertisement_fresh
-            or self._last_liveness >= self._last_seen_service_time
-        ):
-            return "recently_connected"
-        if advertisement_fresh:
-            return "visible"
-        if self._last_seen_service_time is None and self._last_liveness is None:
-            return None
-        return "unreachable"
 
     @property
     def bluetooth_status(self) -> str | None:
         """Return current reachability, or the snapshot for an active publication."""
-        if self._reachability_snapshot_active:
-            return self._reachability_snapshot_status
+        if self._availability.snapshot_active:
+            return self._availability.snapshot_status
         return self._derive_bluetooth_status()
 
-    def export_availability_evidence(
-        self,
-    ) -> tuple[float | None, float | None, datetime | None, str | None, int | None]:
-        """Carry reachability and advertisement history across an entry reload."""
+    def export_availability_evidence(self) -> AvailabilityEvidence:
+        """Preserve history, including the existing final proof of an active link."""
         self._refresh_last_seen_from_ha()
         if self.connected:
-            self._last_liveness = time.monotonic()
-        return (
-            self._last_seen_service_time,
-            self._last_liveness,
-            self._last_seen_wallclock,
-            self._last_advertisement_source,
-            self._last_advertisement_rssi,
-        )
+            self._availability.connection_time = time.monotonic()
+        return self._availability.export()
 
     def restore_availability_evidence(self, evidence: tuple) -> None:
-        """Restore original timestamps and sticky advertisement diagnostics."""
-        (
-            self._last_seen_service_time,
-            self._last_liveness,
-            self._last_seen_wallclock,
-        ) = evidence[:3]
-        if len(evidence) >= 5:
-            self._last_advertisement_source = evidence[3]
-            self._last_advertisement_rssi = evidence[4]
+        self._availability.restore(evidence)
 
     @property
     def last_bluetooth_source(self) -> str | None:
@@ -494,7 +419,7 @@ class AwoxConnectZClient:
     def last_bluetooth_source_id(self) -> str | None:
         """Return the raw source ID of the last known advertisement."""
         self._refresh_last_seen_from_ha()
-        return self._last_advertisement_source
+        return self._availability.source
 
     @property
     def last_connection_source(self) -> str | None:
@@ -511,18 +436,25 @@ class AwoxConnectZClient:
         """Return whether this runtime has completed a successful GATT session."""
         return self._last_connection_observed
 
+    @staticmethod
+    def _register_listener[Listener](
+        listeners: set[Listener], listener: Listener
+    ) -> Callable[[], None]:
+        """Register in a listener set and return an idempotent removal callback."""
+        listeners.add(listener)
+
+        @callback
+        def _remove_listener() -> None:
+            listeners.discard(listener)
+
+        return _remove_listener
+
     @callback
     def async_add_diagnostic_listener(
         self, listener: Callable[[], None]
     ) -> Callable[[], None]:
         """Subscribe an entity to Bluetooth diagnostic changes."""
-        self._diagnostic_listeners.add(listener)
-
-        @callback
-        def _remove_listener() -> None:
-            self._diagnostic_listeners.discard(listener)
-
-        return _remove_listener
+        return self._register_listener(self._diagnostic_listeners, listener)
 
     @callback
     def _async_notify_diagnostic_listeners(self) -> None:
@@ -530,10 +462,10 @@ class AwoxConnectZClient:
         status = self._derive_bluetooth_status()
         available = self._is_available_status(status)
 
-        previous_active = self._reachability_snapshot_active
-        previous_status = self._reachability_snapshot_status
-        self._reachability_snapshot_active = True
-        self._reachability_snapshot_status = status
+        previous_active = self._availability.snapshot_active
+        previous_status = self._availability.snapshot_status
+        self._availability.snapshot_active = True
+        self._availability.snapshot_status = status
         try:
             self._async_set_available(available)
             for listener in tuple(self._diagnostic_listeners):
@@ -544,8 +476,8 @@ class AwoxConnectZClient:
                         "AwoX Connect.Z diagnostic listener failed for %s", self.mac
                     )
         finally:
-            self._reachability_snapshot_active = previous_active
-            self._reachability_snapshot_status = previous_status
+            self._availability.snapshot_active = previous_active
+            self._availability.snapshot_status = previous_status
 
     def _actual_connection_source(self, client: Any | None) -> str | None:
         """Best-effort source of the scanner that actually established the link."""
@@ -601,13 +533,7 @@ class AwoxConnectZClient:
         self, listener: Callable[[bool], None]
     ) -> Callable[[], None]:
         """Subscribe an entity to availability changes."""
-        self._availability_listeners.add(listener)
-
-        @callback
-        def _remove_listener() -> None:
-            self._availability_listeners.discard(listener)
-
-        return _remove_listener
+        return self._register_listener(self._availability_listeners, listener)
 
     @callback
     def _async_set_available(self, available: bool) -> None:
@@ -645,60 +571,18 @@ class AwoxConnectZClient:
         """Record a known-good local GATT session as a liveness signal."""
         if self._closed:
             return
-        self._last_liveness = time.monotonic()
+        self._availability.connection_time = time.monotonic()
         self._availability_wakeup.set()
         self._async_notify_diagnostic_listeners()
 
-    def _latest_liveness_time(self) -> float | None:
-        """Return actual packet/session evidence, never the startup timestamp."""
-        self._refresh_last_seen_from_ha()
-        times = [
-            timestamp
-            for timestamp in (self._last_liveness, self._last_seen_service_time)
-            if timestamp is not None
-        ]
-        return max(times) if times else None
-
     def _availability_wait_seconds(self) -> float:
-        """Calculate the next local reachability check without sending BLE requests."""
-        if self.connected:
-            # Backend connection flags may change without a packet
-            # callback. Recheck locally; this sends no BLE requests.
-            wait_seconds = AVAILABILITY_RECOVERY_POLL_SECONDS
-        else:
-            latest = self._latest_liveness_time()
-            age = (
-                time.monotonic() - latest if latest is not None
-                else self.availability_timeout
-            )
-            if age < self.availability_timeout:
-                wait_seconds = max(
-                    AVAILABILITY_MIN_WAIT_SECONDS,
-                    self.availability_timeout - age,
-                )
-            else:
-                # Home Assistant updates BluetoothServiceInfoBleak.time
-                # even when an identical advertisement is deduplicated
-                # before integration callbacks. While unavailable, poll
-                # that timestamp briefly so unchanged packets restore
-                # availability as soon as practical.
-                wait_seconds = AVAILABILITY_RECOVERY_POLL_SECONDS
-
-        # Recheck advertisement expiry even when availability
-        # remains valid through a newer connection proof; history is retained.
+        connected = self.connected
         self._refresh_last_seen_from_ha()
-        if self._last_seen_service_time is not None:
-            packet_remaining = (
-                self._last_seen_service_time + self.availability_timeout
-                - time.monotonic()
-            )
-            if packet_remaining > 0:
-                wait_seconds = min(
-                    wait_seconds,
-                    max(AVAILABILITY_MIN_WAIT_SECONDS, packet_remaining),
-                )
-
-        return wait_seconds
+        return self._availability.wait_seconds(
+            time.monotonic(), self.availability_timeout, connected=connected,
+            poll=AVAILABILITY_RECOVERY_POLL_SECONDS,
+            minimum=AVAILABILITY_MIN_WAIT_SECONDS,
+        )
 
     @callback
     def async_start_availability_tracking(self) -> None:
@@ -741,13 +625,7 @@ class AwoxConnectZClient:
         self, listener: Callable[[AwoxAdvertisementState], None]
     ) -> Callable[[], None]:
         """Subscribe an entity to decoded advertisement state changes."""
-        self._advertisement_listeners.add(listener)
-
-        @callback
-        def _remove_listener() -> None:
-            self._advertisement_listeners.discard(listener)
-
-        return _remove_listener
+        return self._register_listener(self._advertisement_listeners, listener)
 
     @callback
     def async_set_advertisement_state(
@@ -770,30 +648,20 @@ class AwoxConnectZClient:
             return True
 
         message = str(err).lower()
-        characteristic_missing = (
-            "characteristic" in message
-            and (
-                "not found" in message
-                or "could not be found" in message
-                or "does not exist" in message
-            )
-        )
-        service_missing = (
-            "service" in message
-            and (
-                "not found" in message
-                or "could not be found" in message
-                or "does not exist" in message
-            )
+        missing_service_or_characteristic = (
+            ("characteristic" in message or "service" in message)
+            and any(part in message for part in (
+                "not found", "could not be found", "does not exist"
+            ))
         )
         stale_handle = (
             "invalid handle" in message
             or "attribute not found" in message
         )
-        return characteristic_missing or service_missing or stale_handle
+        return missing_service_or_characteristic or stale_handle
 
-    def _async_find_device_runtime(self) -> Any:
-        """Return the currently known HA Bluetooth device without retry sleeps."""
+    def _async_lookup_device(self) -> Any:
+        """Look up connectable history first, then any known Bluetooth entry."""
         device = async_ble_device_from_address(
             self.hass, self.mac, connectable=True
         )
@@ -801,6 +669,11 @@ class AwoxConnectZClient:
             device = async_ble_device_from_address(
                 self.hass, self.mac, connectable=False
             )
+        return device
+
+    def _async_find_device_runtime(self) -> Any:
+        """Return the currently known HA Bluetooth device without retry sleeps."""
+        device = self._async_lookup_device()
         if device is None:
             scanner_devices = bluetooth.async_scanner_devices_by_address(
                 self.hass, self.mac, connectable=True
@@ -819,13 +692,7 @@ class AwoxConnectZClient:
 
     async def _async_find_device(self) -> Any:
         for attempt in range(1, DISCOVERY_ATTEMPTS + 1):
-            device = async_ble_device_from_address(
-                self.hass, self.mac, connectable=True
-            )
-            if device is None:
-                device = async_ble_device_from_address(
-                    self.hass, self.mac, connectable=False
-                )
+            device = self._async_lookup_device()
             if device is not None:
                 return device
 
@@ -892,12 +759,10 @@ class AwoxConnectZClient:
         # Suspend it while this command merely waits behind another AwoX BLE
         # connection attempt; the queue has its own bounded timeout instead.
         previous_deadline: float | None = None
-        command_budget_suspended = False
         if command_timeout is not None and not command_timeout.expired():
             previous_deadline = command_timeout.when()
             if previous_deadline is not None:
                 command_timeout.reschedule(None)
-                command_budget_suspended = True
 
         try:
             try:
@@ -911,10 +776,9 @@ class AwoxConnectZClient:
                 ) from err
         finally:
             if (
-                command_budget_suspended
+                previous_deadline is not None
                 and command_timeout is not None
                 and not command_timeout.expired()
-                and previous_deadline is not None
             ):
                 waited = loop.time() - wait_started
                 command_timeout.reschedule(previous_deadline + waited)
@@ -1002,16 +866,11 @@ class AwoxConnectZClient:
                         # bounded proxy cleanup has completed.
                         await self._async_disconnect(cancel_idle=False)
                         raise
-                    except TimeoutError as err:
-                        await self._async_disconnect(cancel_idle=False)
-                        raise AwoxConnectZError(
-                            f"Runtime BLE connect timed out after "
-                            f"{RUNTIME_CONNECT_TIMEOUT_SECONDS:.1f}s"
-                        ) from err
                     except Exception as err:
                         await self._async_disconnect(cancel_idle=False)
                         raise AwoxConnectZError(
-                            f"Runtime BLE connect failed: {err}"
+                            f"Runtime BLE connect timed out after {RUNTIME_CONNECT_TIMEOUT_SECONDS:.1f}s"
+                            if isinstance(err, TimeoutError) else f"Runtime BLE connect failed: {err}"
                         ) from err
                 finally:
                     self._runtime_connect_lock.release()
@@ -1033,8 +892,6 @@ class AwoxConnectZClient:
 
             try:
                 await _authenticate_once()
-            except asyncio.CancelledError:
-                raise
             except AwoxAuthenticationError:
                 # Wrong mesh credentials are not a cache problem.
                 await self._async_disconnect(cancel_idle=False)
@@ -1060,8 +917,6 @@ class AwoxConnectZClient:
                 await _connect_once(use_cache=False)
                 try:
                     await _authenticate_once()
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     await self._async_disconnect(cancel_idle=False)
                     raise
@@ -1112,8 +967,6 @@ class AwoxConnectZClient:
                     DISCONNECT_TIMEOUT_SECONDS,
                     self.mac,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as err:
                 _LOGGER.debug(
                     "Ignoring AwoX disconnect error for %s: %s",
@@ -1190,9 +1043,6 @@ class AwoxConnectZClient:
                 try:
                     await self._async_ensure_connected()
                     self._clear_current_error()
-                except asyncio.CancelledError:
-                    await self._async_disconnect(cancel_idle=True)
-                    raise
                 except Exception as err:
                     self._record_error(
                         err,
@@ -1303,8 +1153,6 @@ class AwoxConnectZClient:
             else:
                 # Continuing groups must never reopen a session after loss.
                 self._require_status_session(expected_session)
-        except asyncio.CancelledError:
-            raise
         except Exception as err:
             if isinstance(err, AwoxDeviceNotFound):
                 category, stage, description = "device_not_found", "device_lookup", "device lookup"
@@ -1386,36 +1234,17 @@ class AwoxConnectZClient:
                     # State success is checked separately through 1911.
                     COMMAND_CHAR_UUID, packet, response=False
                 )
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError as err:
-            write_finished = time.monotonic()
-            error = AwoxConnectZError(
-                f"GATT write timed out after {RUNTIME_WRITE_TIMEOUT_SECONDS:.1f}s"
-            )
-            error.__cause__ = err
-            self._record_error(
-                error,
-                category="timeout",
-                stage="gatt_write",
-                command_label=label,
-                write_attempt=attempt,
-            )
-            await self._async_disconnect(cancel_idle=True)
-            return RuntimeCommandResult(
-                RuntimeCommandStatus.WRITE_UNCERTAIN,
-                label=label,
-                error=error,
-                write_finished_monotonic=write_finished,
-                attempt=attempt,
-            )
         except Exception as err:
             write_finished = time.monotonic()
-            error = AwoxConnectZError(f"Command '{label}' write failed: {err}")
+            is_timeout = isinstance(err, TimeoutError)
+            error = AwoxConnectZError(
+                f"GATT write timed out after {RUNTIME_WRITE_TIMEOUT_SECONDS:.1f}s"
+                if is_timeout else f"Command '{label}' write failed: {err}"
+            )
             error.__cause__ = err
             self._record_error(
                 error,
-                category=self._error_category(err, "write"),
+                category="timeout" if is_timeout else self._error_category(err, "write"),
                 stage="gatt_write",
                 command_label=label,
                 write_attempt=attempt,
@@ -1609,78 +1438,5 @@ class AwoxConnectZClient:
             await self._async_disconnect(cancel_idle=False)
 
     def diagnostics(self) -> dict[str, Any]:
-        """Safe diagnostics without credentials."""
-        self._refresh_last_seen_from_ha()
-        source_id = self.last_bluetooth_source_id
-        source_name = self.bluetooth_source_name(source_id)
-        last_seen = self._last_seen_wallclock
-        return {
-            "status_1911": self.status_1911.diagnostics(),
-            "command_confirmation": dict(self.confirmation.diagnostics),
-            "initial_status_polls": self._initial_status_polls,
-            "status_notify_method": self._status_notify_method,
-            "mac": self.mac,
-            "connected": self.connected,
-            "available": self.available,
-            "bluetooth_status": self.bluetooth_status,
-            "signal_strength": self._last_advertisement_rssi,
-            "last_seen": last_seen.isoformat() if last_seen is not None else None,
-            "last_bluetooth_source": source_name,
-            "last_bluetooth_source_id": source_id,
-            "last_connection": self.last_connection_source,
-            "last_connection_source_id": self.last_connection_source_id,
-            "last_connection_time": (
-                self.last_connection_time.isoformat()
-                if self.last_connection_time is not None
-                else None
-            ),
-            "closed": self.closed,
-            "availability_timeout": self.availability_timeout,
-            "default_transition": self.default_transition,
-            "idle_disconnect": self.idle_disconnect,
-            "max_concurrent_commands": self.max_concurrent_commands,
-            "command": {
-                "last_successful": self.last_command,
-                "time": (
-                    self.last_command_time.isoformat()
-                    if self.last_command_time is not None
-                    else None
-                ),
-                "client_operation_duration_ms": (
-                    self.last_command_client_operation_duration_ms
-                ),
-                "attempts": self.last_command_attempts,
-                "retries": self.last_command_retries,
-            },
-            "error": {
-                "last_message": self.last_error_message,
-                "time": (
-                    self.last_error_time.isoformat()
-                    if self.last_error_time is not None
-                    else None
-                ),
-                "category": self.last_error_category,
-                "stage": self.last_error_stage,
-                "command": self.last_error_command,
-                "write_attempt": self.last_error_write_attempt,
-                "current_message": self.last_error,
-            },
-            "mesh_id": {
-                "configured": (
-                    f"0x{self.configured_mesh_id:04X}"
-                    if self.configured_mesh_id is not None
-                    else None
-                ),
-                "advertised": (
-                    f"0x{self.advertised_mesh_id:04X}"
-                    if self.advertised_mesh_id is not None
-                    else None
-                ),
-                "advertised_time": (
-                    self.advertised_mesh_id_time.isoformat()
-                    if self.advertised_mesh_id_time is not None
-                    else None
-                ),
-                "status": self.mesh_id_status,
-            },
-        }
+        """Return the existing HA diagnostic download representation."""
+        return build_client_diagnostics(self)

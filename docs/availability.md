@@ -75,3 +75,10 @@ For example, idle disconnect after 20 seconds and timeout 10 seconds gives
 `connected → recently_connected → unreachable` if no new advertisement arrives.
 The last step is 10 seconds after the regular disconnect begins. A new
 advertisement changes the state to `visible` and starts its own 10-second window.
+
+## Internal structure
+
+`availability.py` owns advertisement history, connection evidence, reachability
+and deadline calculations. `client.py` supplies HA/BLE observations and manages
+the existing worker and entity publications. This separation does not change
+status priority, reload evidence, historical diagnostics or command behavior.

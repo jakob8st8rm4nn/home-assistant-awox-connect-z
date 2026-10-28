@@ -78,14 +78,14 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
  async def test_unexpected_backend_disconnect_wakes_before_full_timeout(self):
   now=[100.0]
   with patch.object(cm,'time',types.SimpleNamespace(monotonic=lambda:now[0])),patch.object(cm,'AVAILABILITY_RECOVERY_POLL_SECONDS',.01):
-   c=self.make_client();c._latest_service_info=lambda:None;c._last_liveness=100.0
+   c=self.make_client();c._latest_service_info=lambda:None;c._availability.connection_time=100.0
    backend=types.SimpleNamespace(is_connected=True);c._client=backend;c.async_start_availability_tracking();await asyncio.sleep(.003)
    now[0]=140.0;backend.is_connected=False;await asyncio.sleep(.035)
    self.assertFalse(c.available);self.assertEqual(c.bluetooth_status,'unreachable');c._client=None;await c.async_close()
  async def test_unexpected_disconnect_keeps_only_unexpired_real_evidence(self):
   now=[100.0]
   with patch.object(cm,'time',types.SimpleNamespace(monotonic=lambda:now[0])),patch.object(cm,'AVAILABILITY_RECOVERY_POLL_SECONDS',.01):
-   c=self.make_client();c._latest_service_info=lambda:None;c._last_liveness=100.0
+   c=self.make_client();c._latest_service_info=lambda:None;c._availability.connection_time=100.0
    backend=types.SimpleNamespace(is_connected=True);c._client=backend;c.async_start_availability_tracking();await asyncio.sleep(.003)
    now[0]=105.0;backend.is_connected=False;await asyncio.sleep(.035)
    self.assertTrue(c.available);self.assertEqual(c.bluetooth_status,'recently_connected')
@@ -102,14 +102,14 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
    for t in (129.99,130.01,130.14,130.151):
     now[0]=t;observed.append(c.bluetooth_status)
    self.assertEqual(observed,['recently_connected','recently_connected','recently_connected','unreachable'])
-   self.assertEqual(c.last_seen,seen);self.assertEqual(c._last_seen_service_time,100.0);self.assertEqual(c._last_liveness,100.15)
+   self.assertEqual(c.last_seen,seen);self.assertEqual(c._availability.advertisement_time,100.0);self.assertEqual(c._availability.connection_time,100.15)
    await c.async_close()
  async def test_idle_disconnect_stays_recently_connected_until_newer_advertisement(self):
   now=[100.0]
   with patch.object(cm,'time',types.SimpleNamespace(monotonic=lambda:now[0])):
    c=self.make_client();c.availability_timeout=30;c._latest_service_info=lambda:None
    c.async_note_bluetooth_liveness(90.0,source='proxy-a',rssi=-60)
-   c._last_liveness=100.0
+   c._availability.connection_time=100.0
    self.assertEqual(c.bluetooth_status,'recently_connected')
    now[0]=105.0
    self.assertEqual(c.bluetooth_status,'recently_connected')
@@ -121,7 +121,7 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
  async def test_known_expired_evidence_never_falls_back_to_unknown_startup(self):
   now=[100.0]
   with patch.object(cm,'time',types.SimpleNamespace(monotonic=lambda:now[0])):
-   c=self.make_client();c._latest_service_info=lambda:None;c._last_liveness=60.0
+   c=self.make_client();c._latest_service_info=lambda:None;c._availability.connection_time=60.0
    self.assertEqual(c.bluetooth_status,'unreachable');await c.async_close()
 
 
@@ -133,7 +133,7 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
    class Backend:
     is_connected=True
     async def disconnect(self):self.is_connected=False
-   c._client=Backend();c._last_liveness=80.0
+   c._client=Backend();c._availability.connection_time=80.0
    seen=c.last_seen
    observed=[]
    c.async_add_diagnostic_listener(lambda:observed.append((c.bluetooth_status,c.last_bluetooth_source,c.available)))
@@ -151,7 +151,7 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
  async def test_already_lost_connection_does_not_receive_idle_grace(self):
   now=[100.0]
   with patch.object(cm,'time',types.SimpleNamespace(monotonic=lambda:now[0])):
-   c=self.make_client();c.availability_timeout=10;c._latest_service_info=lambda:None;c._last_liveness=80.0
+   c=self.make_client();c.availability_timeout=10;c._latest_service_info=lambda:None;c._availability.connection_time=80.0
    class Backend:
     is_connected=False
     async def disconnect(self):pass
@@ -159,7 +159,7 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
    c.async_add_diagnostic_listener(lambda:observed.append(c.bluetooth_status))
    await c._async_disconnect(mark_liveness=True)
    self.assertEqual(observed,['unreachable'])
-   self.assertEqual(c._last_liveness,80.0);await c.async_close()
+   self.assertEqual(c._availability.connection_time,80.0);await c.async_close()
 
  async def test_old_cleanup_does_not_add_grace_to_replacement_client(self):
   now=[100.0]
@@ -170,12 +170,12 @@ class ReloadAvailabilityTests(unittest.IsolatedAsyncioTestCase):
     is_connected=True
     async def disconnect(self):
      self.is_connected=False;c._client=replacement
-     now[0]=102;c._last_liveness=102
+     now[0]=102;c._availability.connection_time=102
    c._client=Backend();observed=[]
    c.async_add_diagnostic_listener(lambda:observed.append(c.bluetooth_status))
    await c._async_disconnect(mark_liveness=True)
    self.assertIs(c._client,replacement);self.assertEqual(observed,['connected'])
-   self.assertEqual(c._last_liveness,102)
+   self.assertEqual(c._availability.connection_time,102)
    c._client=None;await c.async_close()
 
 if __name__=='__main__':unittest.main(verbosity=2)

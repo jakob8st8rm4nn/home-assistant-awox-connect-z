@@ -320,6 +320,38 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
   data=await diagnostics.async_get_config_entry_diagnostics(hass,entry)
   self.assertNotIn('account',data['entry']);self.assertEqual(data['entry']['setup_method'],SETUP_METHOD_LOCAL)
 
+ async def test_diagnostic_export_keeps_history_in_client(self):
+  c=fx.AwoxConnectZClient(fx.Hass(),fx.MAC,'mesh','password',default_transition=.2,
+   idle_disconnect=20,command_semaphore=asyncio.Semaphore(1),max_concurrent_commands=1,
+   configured_mesh_id=fx.MID)
+  c._latest_service_info=lambda:None
+  c._record_error('failed',category='write',stage='gatt_write',command_label='ON',write_attempt=2)
+  c._record_command_success('OFF',started_monotonic=fx.time.monotonic(),attempts=3)
+  data=c.diagnostics()
+  self.assertEqual(data['error']['last_message'],'failed')
+  self.assertEqual(c.last_error_message,'failed')
+  self.assertEqual(data['error']['category'],c.last_error_category)
+  self.assertIsNone(data['error']['current_message'])
+  self.assertEqual(data['command']['last_successful'],c.last_command)
+  self.assertEqual(data['command']['time'],c.last_command_time.isoformat())
+  self.assertEqual(data['command']['retries'],2)
+  data['error']['last_message']='modified export'
+  self.assertEqual(c.last_error_message,'failed')
+  await c.async_close()
+ async def test_advertised_mesh_packet_age_still_converts_to_utc(self):
+  from datetime import datetime,timedelta,timezone
+  from awox112 import client as cm
+  c=fx.AwoxConnectZClient(fx.Hass(),fx.MAC,'mesh','password',default_transition=.2,
+   idle_disconnect=20,command_semaphore=asyncio.Semaphore(1),max_concurrent_commands=1,
+   configured_mesh_id=fx.MID)
+  c._latest_service_info=lambda:None
+  wallclock=datetime(2026,10,24,tzinfo=timezone.utc)
+  with patch.object(cm,'time',types.SimpleNamespace(monotonic=lambda:100)),patch.object(cm.dt_util,'utcnow',lambda:wallclock):
+   c.async_note_advertised_mesh_id(fx.MID,seen_time=99)
+  self.assertEqual(c.advertised_mesh_id_time,wallclock-timedelta(seconds=1))
+  self.assertEqual(c.diagnostics()['mesh_id']['advertised_time'],c.advertised_mesh_id_time.isoformat())
+  await c.async_close()
+
 class TransportBoundaryTests(unittest.IsolatedAsyncioTestCase):
  def client(self,lock=None,semaphore=None):
   c=fx.AwoxConnectZClient(fx.Hass(),fx.MAC,'mesh','password',default_transition=0,

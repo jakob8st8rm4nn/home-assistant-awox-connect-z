@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 import test_small_diagnostic_fixes as fixtures
 opt = fixtures.opt
-from awox112.command_sequences import PlannedCommand, CommandKind as K
+from awox112.command.sequences import PlannedCommand, CommandKind as K
 
 class EffectAppearance(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.SmallDiagnosticFixes.asyncSetUp
@@ -18,6 +18,7 @@ class EffectAppearance(unittest.IsolatedAsyncioTestCase):
             last_confirmed_state=state if confirmed else None,
             async_execute_group=AsyncMock(return_value=tuple(commands)))
         self.e._manager=types.SimpleNamespace(
+            pending_generations=frozenset(),
             peek_next_command=Mock(side_effect=[object(),None]),set_state=lambda state:frozenset(),clear_pending=lambda:None)
         self.e.async_write_ha_state=lambda:None
         self.e._resolve_completed_waiters=lambda:None

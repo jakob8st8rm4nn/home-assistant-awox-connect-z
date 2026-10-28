@@ -164,7 +164,7 @@ async def async_setup_entry(
             evidence = hass.data.get(DATA_AVAILABILITY_EVIDENCE, {}).get(entry.entry_id, {}).get(mac)
             if evidence is not None:
                 client.restore_availability_evidence(evidence)
-            clients.append((client, dict(device)))
+            clients.append((client, device))
 
             packet_tracking = {"active": True, "warned_no_raw": False, "state_time": -1.0}
 

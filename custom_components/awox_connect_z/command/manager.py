@@ -12,7 +12,8 @@ from enum import Enum
 import time
 from typing import Callable
 
-from .command_sequences import (
+from .timing import with_fade_wait
+from .sequences import (
     CommandKind,
     PlannedCommand,
     PlannerState,
@@ -21,9 +22,8 @@ from .command_sequences import (
     normalize_request,
     plan_commands,
 )
-from .const import (
+from ..const import (
     DEFAULT_COMMAND_INTERVAL_MS,
-    FADE_WAIT_FACTOR,
     MAX_COMMAND_INTERVAL_MS,
     MAX_COMMAND_WRITE_ATTEMPTS,
     MIN_COMMAND_INTERVAL_MS,
@@ -39,16 +39,6 @@ _SLOT_FIELDS = {
 }
 
 
-
-@dataclass(frozen=True, slots=True)
-class ManagerSnapshot:
-    """Read-only view of the manager's current logical state."""
-
-    state: PlannerState
-    pending: TargetState
-    planned: tuple[PlannedCommand, ...]
-    in_flight: PlannedCommand | None
-    delay_remaining_s: float
 
 
 @dataclass(slots=True)
@@ -111,12 +101,13 @@ class CommandManager:
                 f"minimum_interval_ms must be between {MIN_COMMAND_INTERVAL_MS} "
                 f"and {MAX_COMMAND_INTERVAL_MS}"
             )
-        if int(max_write_attempts) < 1:
+        max_write_attempts = int(max_write_attempts)
+        if max_write_attempts < 1:
             raise ValueError("max_write_attempts must be at least 1")
 
         self._clock = clock
         self._minimum_interval_s = minimum_interval_ms / 1000.0
-        self._max_write_attempts = int(max_write_attempts)
+        self._max_write_attempts = max_write_attempts
 
         self._state = state
         self._pending = TargetState()
@@ -171,10 +162,6 @@ class CommandManager:
         return self._pending
 
     @property
-    def planned_commands(self) -> tuple[PlannedCommand, ...]:
-        return tuple(self._planned)
-
-    @property
     def in_flight(self) -> PlannedCommand | None:
         return self._in_flight
 
@@ -187,10 +174,6 @@ class CommandManager:
         return self._in_flight_attempt
 
     @property
-    def max_write_attempts(self) -> int:
-        return self._max_write_attempts
-
-    @property
     def request_generation(self) -> int:
         return self._request_generation
 
@@ -198,27 +181,15 @@ class CommandManager:
     def pending_generations(self) -> frozenset[int]:
         """Return generations whose accepted request is not yet complete."""
 
-        generations = {
-            version
-            for version in (
-                self._pending_versions.power,
-                self._pending_versions.brightness,
-                self._pending_versions.appearance,
-                self._pending_versions.effect,
-                self._power_finalizer_generation,
-                # A request whose logical command is already being written is
-                # still unfinished even if a newer request has replaced all of
-                # its pending target slots. Keep its waiter alive until the
-                # physical write result is known.
-                self._in_flight_generation,
-            )
-            if version is not None
-        }
-        return frozenset(generations | self._confirmation_generations | self._queued_generations())
+        return self.write_generations | self._confirmation_generations | self._queued_generations()
 
     @property
     def write_generations(self) -> frozenset[int]:
-        """Pending physical writes, excluding the separate confirmation barrier."""
+        """Pending physical writes, excluding the separate confirmation barrier.
+
+        Keep the running generation even when newer intent replaces its slots:
+        its physical write result is still outstanding.
+        """
         return frozenset(v for v in (
             self._pending_versions.power, self._pending_versions.brightness,
             self._pending_versions.appearance, self._pending_versions.effect,
@@ -234,10 +205,6 @@ class CommandManager:
         if not self._planned or self._in_flight is not None:
             return None
         return self._command_generation(self._planned[0], is_finalizer=self._planned_is_finalizer)
-
-    @property
-    def in_flight_generation(self) -> int | None:
-        return self._in_flight_generation
 
     def release_confirmation(self, generations: frozenset[int]) -> None:
         released = set(generations)
@@ -288,7 +255,7 @@ class CommandManager:
         # Preserve the owner of each surviving slot; do not allocate new requests.
         for generation in sorted(generations):
             fields = {}
-            for slot, names in self._slot_fields().items():
+            for slot, names in _SLOT_FIELDS.items():
                 if getattr(versions, slot) == generation:
                     fields.update((name, getattr(queued, name)) for name in names)
             self._pending, self._pending_versions = self._merge_pending(
@@ -296,12 +263,8 @@ class CommandManager:
             )
         self._replan()
 
-    @staticmethod
-    def _slot_fields() -> dict[str, tuple[str, ...]]:
-        return _SLOT_FIELDS
-
     def _queued_generations(self) -> set[int]:
-        return {g for slot in self._slot_fields()
+        return {g for slot in _SLOT_FIELDS
                 if (g := getattr(self._queued_versions, slot)) is not None}
 
     @staticmethod
@@ -313,7 +276,7 @@ class CommandManager:
                 setattr(versions, slot, None)
                 fields.update((name, False if name == "stop_effect" else None)
                               for name in names)
-        return replace(target, **fields)
+        return replace(target, **fields) if fields else target
 
     def _drop_queued_generation(self, generation: int) -> None:
         self._queued_pending = self._without_generation(
@@ -337,15 +300,6 @@ class CommandManager:
             )
         self._minimum_interval_s = value / 1000.0
 
-    def snapshot(self, *, now: float | None = None) -> ManagerSnapshot:
-        return ManagerSnapshot(
-            state=self._state,
-            pending=self._pending,
-            planned=tuple(self._planned),
-            in_flight=self._in_flight,
-            delay_remaining_s=self.delay_remaining_s(now=now),
-        )
-
     def set_state(self, state: PlannerState) -> frozenset[int]:
         """Reconcile authoritative state; UNKNOWN aborts all pending work."""
 
@@ -353,19 +307,13 @@ class CommandManager:
         if not state.known or state.is_on is None:
             failed = self.pending_generations
             self._suppress_followups.update(failed)
-            if self._in_flight_generation is not None:
-                self._suppress_followups.add(self._in_flight_generation)
             self.clear_pending(_record_suppression=False)
             return failed
 
-        if not self._matches_expected_stored_intermediate(state):
-            if state.is_on or state.effect != self._expected_stored_effect:
-                self._clear_expected_stored_intermediate()
+        if state.is_on or state.effect != self._expected_stored_effect:
+            self._clear_expected_stored_intermediate()
 
-        if self._in_flight is None:
-            self._replan()
-        else:
-            self._replan_after_in_flight = True
+        self._after_pending_change()
         return frozenset()
 
     def clear_pending(self, *, _record_suppression: bool = True) -> None:
@@ -373,8 +321,6 @@ class CommandManager:
 
         if _record_suppression:
             self._suppress_followups.update(self.pending_generations)
-            if self._in_flight_generation is not None:
-                self._suppress_followups.add(self._in_flight_generation)
 
         self._queued_pending, self._queued_versions = TargetState(), _PendingVersions()
         self._clear_pending_targets()
@@ -396,7 +342,6 @@ class CommandManager:
 
         generation = int(generation)
         self._drop_queued_generation(generation)
-        self._confirmation_generations.discard(generation)
         self._suppress_followups.add(generation)
         self._remove_generation(generation)
 
@@ -405,15 +350,10 @@ class CommandManager:
         if self._power_finalizer_generation == generation:
             self._power_finalizer_generation = None
 
-        if self._in_flight is None:
-            self._prune_suppressed_followups()
-            self._replan()
-            return
-
-        self._replan_after_in_flight = True
-        if self._in_flight_generation == generation:
+        if self._in_flight is not None and self._in_flight_generation == generation:
             self._in_flight_retry_cancelled = True
         self._prune_suppressed_followups()
+        self._after_pending_change()
 
     def abort_pending_through(self, cutoff: int) -> frozenset[int]:
         """Abort pending request intent at or before ``cutoff``."""
@@ -425,15 +365,13 @@ class CommandManager:
         self._planned.clear()
         self._planned_is_finalizer = False
 
-        if self._in_flight is None:
-            self._replan()
-        else:
-            self._replan_after_in_flight = True
-            if (
-                self._in_flight_generation is not None
-                and self._in_flight_generation <= cutoff
-            ):
-                self._in_flight_retry_cancelled = True
+        self._after_pending_change()
+        if (
+            self._in_flight is not None
+            and self._in_flight_generation is not None
+            and self._in_flight_generation <= cutoff
+        ):
+            self._in_flight_retry_cancelled = True
         self._prune_suppressed_followups()
         return frozenset(failed)
 
@@ -477,16 +415,7 @@ class CommandManager:
             )
         )
         if preserve_stop_for_older_start and not normalized.stop_effect:
-            normalized = TargetState(
-                power=normalized.power,
-                brightness=normalized.brightness,
-                brightness_transition=normalized.brightness_transition,
-                color=normalized.color,
-                cct=normalized.cct,
-                appearance_transition=normalized.appearance_transition,
-                effect=normalized.effect,
-                stop_effect=True,
-            )
+            normalized = replace(normalized, stop_effect=True)
 
         self._request_generation += 1
         generation = self._request_generation
@@ -534,14 +463,7 @@ class CommandManager:
             return 0.0
         current = self._clock() if now is None else float(now)
         elapsed = max(0.0, current - self._last_write_finished_at)
-        return max(0.0, self._minimum_interval_s + FADE_WAIT_FACTOR * self._last_write_transition_s - elapsed)
-
-    def is_ready(self, *, now: float | None = None) -> bool:
-        return (
-            self._in_flight is None
-            and bool(self._planned)
-            and self.delay_remaining_s(now=now) <= 0.0
-        )
+        return max(0.0, with_fade_wait(self._minimum_interval_s, self._last_write_transition_s) - elapsed)
 
     def peek_next_command(self) -> PlannedCommand | None:
         if self._in_flight is not None or not self._planned:
@@ -656,7 +578,6 @@ class CommandManager:
         self._suppress_followups.discard(generation)
         self._prune_suppressed_followups()
         self._replan_after_in_flight = False
-        self._prune_write_attempts()
         self._replan()
         completed_by_replan = before_write_generations - self.write_generations
         completed_by_replan = completed_by_replan - suppressed_before
@@ -692,7 +613,7 @@ class CommandManager:
             # this branch. Explicitly retain the generation whose write outcome
             # became ambiguous so it cannot be reported as successfully
             # completed merely because a newer request superseded its targets.
-            failed = frozenset((*self.pending_generations, generation))
+            failed = self.pending_generations | {generation}
             self._suppress_followups.update(failed)
             self._power_finalizer_generation = None
             self._confirmation_generations.clear()
@@ -752,10 +673,7 @@ class CommandManager:
         return WriteFailureResult(WriteFailureAction.RETRY)
 
     def force_replan(self) -> tuple[PlannedCommand, ...]:
-        if self._in_flight is not None:
-            self._replan_after_in_flight = True
-            return tuple(self._planned)
-        self._replan()
+        self._after_pending_change()
         return tuple(self._planned)
 
     def _finish_in_flight(self) -> None:
@@ -793,17 +711,13 @@ class CommandManager:
             # generation that triggered recovery.
             generation = versions.effect if self._pending.stop_effect else None
             if generation is None:
-                active = [
-                    value
-                    for value in (
-                        versions.power,
-                        versions.brightness,
-                        versions.appearance,
-                        versions.effect,
-                    )
-                    if value is not None
-                ]
-                generation = max(active) if active else self._request_generation
+                generation = max(
+                    (value for value in (
+                        versions.power, versions.brightness,
+                        versions.appearance, versions.effect,
+                    ) if value is not None),
+                    default=self._request_generation,
+                )
 
         assert generation is not None, "planned command must have an owning target"
         return generation
@@ -826,14 +740,13 @@ class CommandManager:
         )
 
     def _prune_write_attempts(self) -> None:
-        active = self.pending_generations
-        if self._in_flight_generation is not None:
-            active = frozenset((*active, self._in_flight_generation))
-        self._write_attempts = {
-            key: attempts
-            for key, attempts in self._write_attempts.items()
-            if key[1] in active
-        }
+        if self._write_attempts:
+            active = self.pending_generations
+            self._write_attempts = {
+                key: attempts
+                for key, attempts in self._write_attempts.items()
+                if key[1] in active
+            }
 
     def _replan(self) -> None:
         self._prune_write_attempts()
@@ -890,29 +803,19 @@ class CommandManager:
             == self._expected_stored_effect_generation
         )
 
-    def _matches_expected_stored_intermediate(self, state: PlannerState) -> bool:
-        return (
-            self._expected_stored_effect_generation is not None
-            and state.known
-            and state.is_on is False
-            and state.effect == self._expected_stored_effect
-        )
-
     def _clear_expected_stored_intermediate(self) -> None:
         self._expected_stored_effect_generation = None
         self._expected_stored_effect = None
 
     @staticmethod
     def _has_pending_targets(target: TargetState) -> bool:
-        return any(
-            (
-                target.power is not None,
-                target.brightness is not None,
-                target.color is not None,
-                target.cct is not None,
-                target.effect is not None,
-                target.stop_effect,
-            )
+        return (
+            target.power is not None
+            or target.brightness is not None
+            or target.color is not None
+            or target.cct is not None
+            or target.effect is not None
+            or bool(target.stop_effect)
         )
 
     @staticmethod
@@ -940,12 +843,7 @@ class CommandManager:
         effect = current.effect
         stop_effect = current.stop_effect
 
-        new_versions = _PendingVersions(
-            power=versions.power,
-            brightness=versions.brightness,
-            appearance=versions.appearance,
-            effect=versions.effect,
-        )
+        new_versions = replace(versions)
 
         incoming_appearance = incoming.color is not None or incoming.cct is not None
         incoming_requires_on = (
@@ -959,10 +857,6 @@ class CommandManager:
         # internal Power-ON tail so preparatory writes cannot lose the eventual
         # ON requirement during advertisement-driven replanning.
         if incoming_requires_on:
-            power = True
-            new_versions.power = generation
-
-        if incoming.power is True:
             power = True
             new_versions.power = generation
 
@@ -1038,7 +932,7 @@ class CommandManager:
             if generation <= cutoff:
                 self._confirmation_aliases.pop(generation, None)
         self._confirmation_generations.difference_update(g for g in tuple(self._confirmation_generations) if g <= cutoff)
-        versions = [
+        versions = {
             value
             for value in (
                 self._pending_versions.power,
@@ -1047,8 +941,8 @@ class CommandManager:
                 self._pending_versions.effect,
             )
             if value is not None and value <= cutoff
-        ]
-        for generation in sorted(set(versions)):
+        }
+        for generation in sorted(versions):
             self._remove_generation(generation)
 
         if (
@@ -1078,19 +972,15 @@ class CommandManager:
         is_on = state.is_on
         effect = state.effect
 
-        if command.kind is CommandKind.POWER_ON:
+        if command.kind in (CommandKind.POWER_ON, CommandKind.BRIGHTNESS_ON):
             is_on = True
         elif command.kind is CommandKind.POWER_OFF:
             is_on = False
             effect = None
-        elif command.kind is CommandKind.BRIGHTNESS_ON:
-            is_on = True
-        elif command.kind in {CommandKind.COLOR, CommandKind.CCT}:
+        elif command.kind in (CommandKind.COLOR, CommandKind.CCT, CommandKind.EFFECT_STOP):
             effect = None
         elif command.kind is CommandKind.EFFECT_START:
             effect = str(command.value)
-        elif command.kind is CommandKind.EFFECT_STOP:
-            effect = None
 
         return PlannerState(known=True, is_on=is_on, effect=effect)
 
@@ -1115,13 +1005,9 @@ class CommandManager:
         def completed(version: int | None) -> bool:
             return version is not None and version <= generation_cutoff
 
-        if command.kind is CommandKind.POWER_ON:
-            if power is True and completed(versions.power):
-                power = None
-                versions.power = None
-
-        elif command.kind is CommandKind.POWER_OFF:
-            if power is False and completed(versions.power):
+        if command.kind is CommandKind.POWER_ON or command.kind is CommandKind.POWER_OFF:
+            expected_power = command.kind is CommandKind.POWER_ON
+            if power is expected_power and completed(versions.power):
                 power = None
                 versions.power = None
 
@@ -1179,7 +1065,6 @@ __all__ = [
     "CommandManager",
     "CommandManagerError",
     "CommandNotReadyError",
-    "ManagerSnapshot",
     "NoWriteInProgressError",
     "WriteFailureAction",
     "WriteFailureResult",

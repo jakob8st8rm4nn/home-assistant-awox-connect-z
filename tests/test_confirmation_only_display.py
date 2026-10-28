@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock
 import test_small_diagnostic_fixes as fixtures
-from awox112.command_sequences import PlannerState, TargetState
+from awox112.command.sequences import PlannerState, TargetState
 opt=fixtures.opt
 
 class ConfirmationOnlyDisplay(unittest.IsolatedAsyncioTestCase):

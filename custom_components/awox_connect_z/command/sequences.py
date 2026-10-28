@@ -108,13 +108,20 @@ def _validate_state(state: PlannerState) -> None:
         )
 
 
-def _validate_numeric_targets(target: TargetState) -> None:
+def _validate_targets(target: TargetState) -> None:
+    """Validate numeric bounds and conflicts after request-level OFF precedence."""
     if target.brightness is not None and target.brightness < 0:
         raise SequenceConflictError("Brightness must not be negative")
     if target.brightness_transition is not None and target.brightness_transition < 0:
         raise SequenceConflictError("Brightness transition must not be negative")
     if target.appearance_transition is not None and target.appearance_transition < 0:
         raise SequenceConflictError("Appearance transition must not be negative")
+    if target.color is not None and target.cct is not None:
+        raise SequenceConflictError("Color and CCT cannot both be requested")
+    if target.effect is not None and target.stop_effect:
+        raise SequenceConflictError(
+            "Effect start and explicit effect stop cannot be requested together"
+        )
 
 
 def normalize_request(state: PlannerState, target: TargetState) -> TargetState:
@@ -132,14 +139,7 @@ def normalize_request(state: PlannerState, target: TargetState) -> TargetState:
     if target.power is False or target.brightness == 0:
         return TargetState(power=False)
 
-    _validate_numeric_targets(target)
-
-    if target.color is not None and target.cct is not None:
-        raise SequenceConflictError("Color and CCT cannot both be requested")
-    if target.effect is not None and target.stop_effect:
-        raise SequenceConflictError(
-            "Effect start and explicit effect stop cannot be requested together"
-        )
+    _validate_targets(target)
 
     has_appearance = target.color is not None or target.cct is not None
     has_positive_brightness = target.brightness is not None and target.brightness > 0
@@ -201,7 +201,7 @@ def _plan_normal(
     state: PlannerState,
     target: TargetState,
 ) -> tuple[PlannedCommand, ...]:
-    """Plan a normalized target from a normal (non-recovery) state."""
+    """Plan an already-validated target from a normal (non-recovery) state."""
 
     assert state.is_on is not None
 
@@ -209,12 +209,6 @@ def _plan_normal(
     # directly instead of going through CommandManager.submit().
     if target.power is False or target.brightness == 0:
         return _plan_power(state, False)
-    if target.color is not None and target.cct is not None:
-        raise SequenceConflictError("Color and CCT cannot both be requested")
-    if target.effect is not None and target.stop_effect:
-        raise SequenceConflictError(
-            "Effect start and explicit effect stop cannot be requested together"
-        )
 
     has_appearance = target.color is not None or target.cct is not None
     has_brightness = target.brightness is not None and target.brightness > 0
@@ -283,10 +277,8 @@ def _plan_normal(
         return (appearance, _cmd(CommandKind.POWER_ON))
 
     if effect_start is not None:
-        if state.is_on:
-            if state.effect == target.effect:
-                return ()
-            return (effect_start, _cmd(CommandKind.POWER_ON))
+        if state.is_on and state.effect == target.effect:
+            return ()
         return (effect_start, _cmd(CommandKind.POWER_ON))
 
     if brightness is not None:
@@ -295,8 +287,6 @@ def _plan_normal(
     if stop_effect:
         if state.effect is None:
             return _plan_power(state, True) if target.power is True else ()
-        if target.power is True and state.is_on:
-            return (_cmd(CommandKind.EFFECT_STOP, state.effect),)
         if target.power is True and not state.is_on:
             return (
                 _cmd(CommandKind.EFFECT_STOP, state.effect),
@@ -335,13 +325,7 @@ def plan_commands(
     if target.power is False or target.brightness == 0:
         normalized = TargetState(power=False)
     else:
-        _validate_numeric_targets(target)
-        if target.color is not None and target.cct is not None:
-            raise SequenceConflictError("Color and CCT cannot both be requested")
-        if target.effect is not None and target.stop_effect:
-            raise SequenceConflictError(
-                "Effect start and explicit effect stop cannot be requested together"
-            )
+        _validate_targets(target)
         normalized = target
 
     # OFF + stored effect is an exceptional recovery state. Recovery is a fixed

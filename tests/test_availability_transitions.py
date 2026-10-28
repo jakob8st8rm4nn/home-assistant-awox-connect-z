@@ -61,7 +61,7 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
         self.coherent(events)
 
     async def test_publication_uses_one_reachability_snapshot_at_deadline(self):
-        c = self.client(); c._last_seen_service_time = 100
+        c = self.client(); c._availability.advertisement_time = 100
         c._available = False
         observations = []
 
@@ -105,7 +105,7 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1], ('unreachable', False))
 
     async def test_cache_only_recovery_publications_are_coherent(self):
-        c = self.client(timeout=.02); c._last_liveness = 99
+        c = self.client(timeout=.02); c._availability.connection_time = 99
         c.async_start_availability_tracking()
         events = self.watch(c)
         c._latest_service_info = lambda: types.SimpleNamespace(time=100, source='proxy', rssi=-60)
@@ -114,7 +114,7 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1], ('visible', True))
 
     async def test_backend_connect_before_auth_diagnostic_is_coherent(self):
-        c = self.client(); c._last_liveness = 80
+        c = self.client(); c._availability.connection_time = 80
         c.async_start_availability_tracking()
         events = self.watch(c)
         c._client = types.SimpleNamespace(is_connected=True)
@@ -122,7 +122,7 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
         self.coherent(events)
 
     async def cleanup_case(self, *, delay=1, failure=False, cancel=False):
-        c = self.client(); c._last_liveness = 80
+        c = self.client(); c._availability.connection_time = 80
         entered = asyncio.Event(); release = asyncio.Event()
         class Backend:
             is_connected = True
@@ -158,18 +158,18 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_cleanup_does_not_renew_liveness_at_completion(self):
         c, events, during = await self.cleanup_case(delay=11, failure=True)
-        self.assertEqual(c._last_liveness, 100)
+        self.assertEqual(c._availability.connection_time, 100)
         self.assertFalse(c.available)
         self.coherent(events)
 
     async def test_cancelled_cleanup_preserves_fixed_deadline(self):
         c, events, during = await self.cleanup_case(delay=2, cancel=True)
-        self.assertEqual(c._last_liveness, 100)
-        self.assertEqual(c._last_liveness, 100)
+        self.assertEqual(c._availability.connection_time, 100)
+        self.assertEqual(c._availability.connection_time, 100)
         self.coherent(events)
 
     async def test_packet_during_cleanup_owns_new_deadline(self):
-        c = self.client(); c._last_liveness = 80
+        c = self.client(); c._availability.connection_time = 80
         test = self
         class Backend:
             is_connected = True
@@ -179,12 +179,13 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
                 test.now = 105
         c._client = Backend()
         await c._async_disconnect(mark_liveness=True)
-        self.assertEqual(c._latest_liveness_time(), 102)
+        self.assertEqual(c.bluetooth_status, 'visible')
+        self.now = 111; self.assertTrue(c.available)
         self.now = 112
         self.assertFalse(c.available)
 
     async def test_bad_listener_does_not_block_other_entities(self):
-        c = self.client(); c._last_liveness = 80; c._available = True
+        c = self.client(); c._availability.connection_time = 80; c._available = True
         def bad(*a): raise RuntimeError('entity callback failed')
         # Force a stable ordering to ensure the failure precedes the good listener.
         good = []
@@ -200,8 +201,8 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
                 (None, 0, 9.999, 10, 30, 60, 80)):
             with self.subTest(timeout=timeout, connected=connected, packet=packet_age, session=session_age):
                 c = self.client(timeout=timeout)
-                c._last_seen_service_time = None if packet_age is None else 100-packet_age
-                c._last_liveness = None if session_age is None else 100-session_age
+                c._availability.advertisement_time = None if packet_age is None else 100-packet_age
+                c._availability.connection_time = None if session_age is None else 100-session_age
                 c._client = types.SimpleNamespace(is_connected=connected)
                 expected = connected or any(age is not None and age < timeout for age in (packet_age, session_age))
                 packet_fresh = packet_age is not None and packet_age < timeout
@@ -223,7 +224,8 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
         seen = c.last_seen
         self.now = 105; c.async_note_bluetooth_liveness(90)
         self.assertEqual(c.last_seen, seen)
-        self.assertEqual(c._latest_liveness_time(), 100)
+        self.assertEqual(c.bluetooth_status, 'visible')
+        self.now = 109; self.assertTrue(c.available)
         self.now = 110; self.assertFalse(c.available)
 
     async def test_shutdown_cannot_be_revived_by_late_packet(self):
@@ -256,7 +258,7 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(c.last_seen, seen)
 
     async def test_cleanup_timeout_never_restarts_expired_deadline(self):
-        c = self.client(); c._last_liveness = 80
+        c = self.client(); c._availability.connection_time = 80
         test = self
         class Backend:
             is_connected = True
@@ -268,7 +270,7 @@ class AvailabilityTransitions(unittest.IsolatedAsyncioTestCase):
         with patch.object(cm, 'DISCONNECT_TIMEOUT_SECONDS', .01):
             with self.assertLogs(cm._LOGGER, level='WARNING'):
                 await c._async_disconnect(mark_liveness=True)
-        self.assertEqual(c._last_liveness, 100)
+        self.assertEqual(c._availability.connection_time, 100)
         self.assertEqual(events[-1], ('unreachable', False))
         self.coherent(events)
 

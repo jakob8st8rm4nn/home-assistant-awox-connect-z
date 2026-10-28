@@ -5,11 +5,23 @@ import asyncio
 from collections import deque
 from dataclasses import asdict, dataclass
 import time
-from typing import Callable
+from typing import Callable, TypedDict
 
 from .advertisement import AwoxAdvertisementState, lamp_state_from_fields
 from .const import STATUS_EFFECTS
 from .protocol import parse_status_1911
+
+
+class StatusGoal(TypedDict, total=False):
+    """Absent fields are ignored; effect=None explicitly requires no effect."""
+
+    power: bool
+    brightness: int
+    color_mode: bool
+    effect: str | None
+    mired: int | None
+    hue: int | None
+    saturation: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,16 +41,14 @@ class Status1911State:
     saturation: int | None
     outer_type: int = 0x80
 
-    def matches(self, goal: dict) -> bool:
+    def matches(self, goal: StatusGoal) -> bool:
         for name, expected in goal.items():
             actual = getattr(self, name, None)
-            if actual is None and expected is not None:
-                return False
+            if actual is None or expected is None:
+                if actual != expected:
+                    return False
+                continue
             if name in {"brightness", "mired", "saturation", "hue"}:
-                if actual is None or expected is None:
-                    if actual != expected:
-                        return False
-                    continue
                 if name == "hue":
                     if actual == 255:
                         # An effect sample with FF cannot prove a fixed hue goal.
@@ -131,18 +141,21 @@ class Status1911Store:
         for listener in tuple(self.listeners):
             listener(state)
 
-    async def wait(self, goal: dict, generation: int, after: float,
+    async def wait(self, goal: StatusGoal, generation: int, after: float,
                    deadline: float, valid: Callable[[], bool]) -> Status1911State | None:
         while self.active and self.session_generation == generation and valid():
             self.changed.clear()
             for state in reversed(self.frames):
-                if state.received_monotonic >= after and state.matches(goal):
+                # feed() appends in monotonic receive order; older frames cannot match.
+                if state.received_monotonic < after:
+                    break
+                if state.matches(goal):
                     return state
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             try:
-                # A new HA request or cancellation must interrupt old confirmation.
+                # Recheck confirmation ownership even without a new notification.
                 await asyncio.wait_for(self.changed.wait(), min(remaining, .05))
             except TimeoutError:
                 pass

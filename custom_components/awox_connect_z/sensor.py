@@ -17,10 +17,10 @@ from homeassistant.const import (
     EntityCategory,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .client import AwoxConnectZClient
+from .device_info import build_device_info
 from .const import (
     DOMAIN,
     RSSI_MIN_PUBLISH_INTERVAL_SECONDS,
@@ -117,18 +117,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
                 "connected", "visible", "recently_connected", "unreachable"
             ]
 
-        device_name = str(device.get("name") or f"AwoX {mac[-8:]}")
-        model = str(device.get("model") or "Connect.Z RGB/TW")
-        manufacturer = str(device.get("manufacturer") or "AwoX / EGLO")
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, mac)},
-            name=device_name,
-            manufacturer=manufacturer,
-            model=model,
-            sw_version=device.get("firmware"),
-            hw_version=device.get("hardware"),
-            connections={("bluetooth", mac)},
-        )
+        self._attr_device_info = build_device_info(mac, device)
 
     @property
     def available(self) -> bool:
@@ -157,7 +146,7 @@ class AwoxConnectZDiagnosticSensor(RestoreSensor):
         if self.entity_description.key != "mesh_id":
             return value
         attributes = self.extra_state_attributes or {}
-        return value, tuple(sorted(attributes.items()))
+        return value, tuple(attributes.items())
 
     @property
     def native_value(self):

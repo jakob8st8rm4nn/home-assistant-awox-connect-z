@@ -22,15 +22,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_ON
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .advertisement import AwoxAdvertisementState
 from .client import AwoxConnectZClient
-from .command_executor import CommandExecutionFailed, CommandExecutor
-from .command_manager import CommandManager
-from .command_sequences import (
+from .device_info import build_device_info
+from .command.executor import CommandExecutionFailed, CommandExecutor
+from .command.manager import CommandManager
+from .command.sequences import (
     PlannerState,
     SequenceConflictError,
     TargetState,
@@ -116,7 +116,6 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         self._device = device
         self._mac = client.mac
         self._mesh_id = int(device["mesh_id"])
-        self._device_name = str(device.get("name") or f"AwoX {self._mac[-8:]}")
 
         self._manager = CommandManager(
             PlannerState(known=False, is_on=None, effect=None),
@@ -143,17 +142,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
         self._attr_effect = EFFECT_OFF
         self._effect_state_known = False
 
-        model = str(device.get("model") or "Connect.Z RGB/TW")
-        manufacturer = str(device.get("manufacturer") or "AwoX / EGLO")
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._mac)},
-            name=self._device_name,
-            manufacturer=manufacturer,
-            model=model,
-            sw_version=device.get("firmware"),
-            hw_version=device.get("hardware"),
-            connections={("bluetooth", self._mac)},
-        )
+        self._attr_device_info = build_device_info(self._mac, device)
 
     @property
     def available(self) -> bool:
@@ -309,6 +298,8 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
     @callback
     def _resolve_completed_waiters(self) -> None:
+        if not self._request_waiters:
+            return
         active = self._manager.pending_generations
         for generation, waiter in tuple(self._request_waiters.items()):
             if waiter.done():
@@ -373,8 +364,7 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             return
 
         self._resolve_completed_waiters()
-        if self._manager.peek_next_command() is not None:
-            self._ensure_command_worker()
+        self._ensure_command_worker()
 
     @callback
     def _async_cancel_command_worker(self) -> None:
@@ -399,18 +389,13 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
 
             try:
                 commands = await self._executor.async_execute_group()
-            except asyncio.CancelledError:
-                raise
             except CommandExecutionFailed as err:
                 if err.uncertain:
                     self._set_effect_state_unknown()
                     self.async_write_ha_state()
                 self._fail_waiters(err.failed_generations, err)
-                self._resolve_completed_waiters()
                 # Newer requests may have survived the failed generation.
-                if self._manager.peek_next_command() is None:
-                    return
-                continue
+                commands = ()
             except Exception as err:
                 # Programming/protocol errors are not safe to leave queued.
                 failed = self._manager.pending_generations
@@ -427,7 +412,10 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                     return
                 continue
 
-            if self._executor.last_confirmed_state is not None:
+            # The executor already rebased the planner on this confirmation.
+            # Do not roll the display back while accepted follow-up work remains.
+            if (self._executor.last_confirmed_state is not None
+                    and not self._manager.pending_generations):
                 self._async_apply_status_1911(
                     self._executor.last_confirmed_state, confirmed_group=True
                 )
@@ -444,7 +432,6 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
                     self._async_apply_status_1911(state)
         if self._entity_unloading:
             raise HomeAssistantError("AwoX entity unloaded during initial-state lookup")
-        previous_generation = self._manager.request_generation
         try:
             self._manager.submit(target)
         except UnknownPlannerStateError as err:
@@ -455,10 +442,6 @@ class AwoxConnectZLight(LightEntity, RestoreEntity):
             raise HomeAssistantError(str(err)) from err
 
         generation = self._manager.request_generation
-        if generation == previous_generation:
-            # Reserved for callers that complete without accepting a generation.
-            return
-
         waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._request_waiters[generation] = waiter
         self._resolve_completed_waiters()

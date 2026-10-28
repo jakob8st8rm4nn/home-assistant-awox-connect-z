@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import test_optimization as opt
 from awox112 import client as cm
+from awox112 import diagnostics as dm
 
 
 class SmallDiagnosticFixes(unittest.IsolatedAsyncioTestCase):
@@ -43,6 +44,66 @@ class SmallDiagnosticFixes(unittest.IsolatedAsyncioTestCase):
             async def disconnect(inner): inner.is_connected = False
         self.c._client = Backend()
         self.c._async_note_connection_liveness()
+
+    async def test_export_remains_consistent_across_timeout_boundary(self):
+        self.c.availability_timeout = 30
+        self.c._availability.advertisement_time = 70.003
+        clock = types.SimpleNamespace(monotonic=unittest.mock.Mock(
+            side_effect=(100., 100.004, 100.008)))
+        with patch.object(cm, 'time', clock), patch.object(dm, 'time', clock):
+            data = self.c.diagnostics()
+        self.assertTrue(data['available'])
+        self.assertEqual(data['bluetooth_status'], 'visible')
+
+    async def test_export_preserves_publication_snapshot_and_closed_guard(self):
+        self.c._availability.advertisement_time = 1.
+        for status in (None, 'visible', 'recently_connected', 'unreachable'):
+            for closed in (False, True):
+                with self.subTest(status=status, closed=closed):
+                    self.c._availability.snapshot_active = True
+                    self.c._availability.snapshot_status = status
+                    self.c._closed = closed
+                    data = self.c.diagnostics()
+                    self.assertEqual(data['bluetooth_status'], status)
+                    self.assertEqual(data['available'],
+                        not closed and status in ('visible', 'recently_connected'))
+        self.c._closed = False
+        self.c._availability.snapshot_active = False
+
+    async def test_export_refreshes_history_once_and_retains_fields(self):
+        self.info = types.SimpleNamespace(time=100., source='scan-proxy', rssi=-65)
+        with patch.object(self.c, '_refresh_last_seen_from_ha',
+                          wraps=self.c._refresh_last_seen_from_ha) as refresh:
+            with patch.object(dm, 'time', types.SimpleNamespace(monotonic=lambda: self.now)):
+                data = self.c.diagnostics()
+        refresh.assert_called_once_with()
+        self.assertEqual(data['last_bluetooth_source_id'], 'scan-proxy')
+        self.assertEqual(data['signal_strength'], -65)
+        self.assertEqual(data['last_seen'], self.c._availability.last_seen.isoformat())
+        self.assertTrue(data['available'])
+        self.assertEqual(data['bluetooth_status'], 'visible')
+
+    async def test_empty_waiters_do_not_read_pending_generations(self):
+        with patch.object(type(self.e._manager), 'pending_generations',
+                          new_callable=unittest.mock.PropertyMock) as pending:
+            self.e._resolve_completed_waiters()
+        pending.assert_not_called()
+
+    async def test_waiter_resolution_keeps_active_and_completes_removed(self):
+        active, removed, done, cancelled = (
+            asyncio.get_running_loop().create_future() for _ in range(4))
+        done.set_result(None)
+        cancelled.cancel()
+        self.e._request_waiters = {1: active, 2: removed, 3: done, 4: cancelled}
+        with patch.object(type(self.e._manager), 'pending_generations',
+                          new_callable=unittest.mock.PropertyMock,
+                          return_value=frozenset((1, 3, 4))):
+            self.e._resolve_completed_waiters()
+        self.assertEqual(self.e._request_waiters, {1: active})
+        self.assertFalse(active.done())
+        self.assertIsNone(removed.result())
+        self.assertTrue(cancelled.cancelled())
+        active.cancel()
 
     async def test_regular_disconnect_publishes_false_while_available(self):
         self.connect(); self.writes.clear()

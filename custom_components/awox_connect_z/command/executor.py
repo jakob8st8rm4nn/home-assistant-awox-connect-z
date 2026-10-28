@@ -6,23 +6,23 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from .client import (
+from ..client import (
     AwoxConnectZClient,
     AwoxConnectZError,
     RuntimeCommandResult,
     RuntimeCommandStatus,
     RuntimeSelectedCommand,
 )
-from .command_manager import (
+from .manager import (
     CommandManager,
     CommandNotReadyError,
     WriteFailureAction,
 )
-from .command_sequences import CommandKind, PlannedCommand, PlannerState
-from .command_confirmation import ConfirmationBatch, ExecutedCommand
-from .const import EFFECT_CANDLE, EFFECT_COLOR_CYCLE
-from .protocol import (
-    ha_brightness_to_device,
+from .sequences import CommandKind, PlannedCommand, PlannerState
+from .confirmation import ConfirmationBatch, ExecutedCommand
+from ..const import EFFECT_CANDLE, EFFECT_COLOR_CYCLE
+from ..protocol import (
+    encoded_transition_seconds,
     make_brightness,
     make_candle_effect,
     make_color_cycle_start,
@@ -76,7 +76,7 @@ class PreparedCommand:
 class CommandExecutor:
     """Bridge CommandManager, protocol frame builders and BLE transport.
 
-    Planning remains entirely in ``command_sequences.py`` / ``command_manager.py``.
+    Planning remains entirely in ``command/sequences.py`` / ``command/manager.py``.
     The executor waits for manager spacing, lets the client prepare connection and
     authentication, late-selects the still-current command immediately before the
     GATT write, and reports the structured result back to the manager.
@@ -102,20 +102,11 @@ class CommandExecutor:
         self._group_lock = asyncio.Lock()
         self.busy = False
         self.last_confirmed_state = None
-        self.last_batch_outcome = None
         self._last_executed = None
         self._last_selected_cutoff = None
         self._required_session = None
         self._group_cutoff = None
         self._freeze_group = False
-
-    @property
-    def manager(self) -> CommandManager:
-        return self._manager
-
-    @property
-    def client(self) -> AwoxConnectZClient:
-        return self._client
 
     async def async_execute_next(self) -> PlannedCommand | None:
         """Execute the next logical command, including manager-approved retries.
@@ -143,13 +134,12 @@ class CommandExecutor:
 
                 preparation_cutoff = self._manager.request_generation
                 selected: PreparedCommand | None = None
-                selected_generation = None
                 selected_started = None
                 selected_session = None
                 boundary_reached = False
 
                 def selector() -> RuntimeSelectedCommand | None:
-                    nonlocal selected, selected_generation, selected_started, selected_session, boundary_reached
+                    nonlocal selected, selected_started, selected_session, boundary_reached
 
                     current = self._manager.peek_next_command()
                     if current is None:
@@ -180,12 +170,7 @@ class CommandExecutor:
                             "write-boundary step"
                         )
 
-                    selected = PreparedCommand(
-                        command=taken,
-                        frame=prepared.frame,
-                        label=prepared.label,
-                    )
-                    selected_generation = self._manager.in_flight_generation
+                    selected = prepared
                     selected_started = time.monotonic()
                     selected_session = self._client.status_1911.session_generation
                     self._last_selected_cutoff = self._manager.execution_generation
@@ -216,11 +201,11 @@ class CommandExecutor:
                 )
                 if outcome is not None:
                     self._last_executed = ExecutedCommand(
-                        selected.command, selected.frame, selected_generation,
+                        selected.command, selected.frame,
                         selected_started, result.write_finished_monotonic,
-                        int.from_bytes(selected.frame[9:11], "little") / 10
+                        encoded_transition_seconds(selected.frame, layout="brightness")
                         if selected.command.kind is CommandKind.BRIGHTNESS_ON else
-                        int.from_bytes(selected.frame[10:12], "little") / 10
+                        encoded_transition_seconds(selected.frame, layout="appearance")
                         if selected.command.kind in (CommandKind.COLOR, CommandKind.CCT) else 0,
                         self._manager.last_write_generations,
                     )
@@ -243,39 +228,33 @@ class CommandExecutor:
             self._required_session = None
             self._group_cutoff = None
             self.last_confirmed_state = None
-            self.last_batch_outcome = None
             commands = []
-            cutoff = None
-            session = None
             try:
                 async with self._client.status_transaction():
                     while self._manager.peek_next_command() is not None:
                         if commands:
                             if (not self._client.connected or
-                                    self._client.status_1911.session_generation != session):
+                                    self._client.status_1911.session_generation != self._required_session):
                                 raise ConnectionError("Connection changed inside a command group")
                             # Do not append an endless stream of newer generations.
                             # An outstanding power finalizer retains its old owner.
-                            if (self._manager.next_command_generation > cutoff and
+                            if (self._manager.next_command_generation > self._group_cutoff and
                                     not self._manager.power_finalizer_pending):
                                 break
                         command = await self.async_execute_next()
                         if command is None:
                             continue
                         commands.append(self._last_executed)
-                        if cutoff is None:
-                            cutoff = self._last_selected_cutoff
-                            session = self._last_session
-                            self._required_session = session
-                            self._group_cutoff = cutoff
+                        if self._group_cutoff is None:
+                            self._required_session = self._last_session
+                            self._group_cutoff = self._last_selected_cutoff
                     if not commands:
                         return ()
                     generations = frozenset(g for item in commands for g in item.affected_generations)
                     if not generations:
-                        self.last_batch_outcome = "cancelled"
                         raise ConnectionError("Selected group was cancelled before confirmation")
-                    actual_cutoff = max(cutoff, max(generations))
-                    batch = ConfirmationBatch(session, actual_cutoff, generations, tuple(commands))
+                    actual_cutoff = max(self._group_cutoff, max(generations))
+                    batch = ConfirmationBatch(self._required_session, tuple(commands))
                     valid = lambda: (
                         not self._client.closed and self._manager.state.known and
                         self._manager.confirmation_is_current(actual_cutoff, generations)
@@ -286,7 +265,6 @@ class CommandExecutor:
                         self._manager.note_repeat_write,
                         lambda: dict(base_goal, **self._manager.confirmation_goal(generations)),
                     )
-                    self.last_batch_outcome = outcome
                     if outcome == "unconfirmed":
                         raise ConnectionError("1911 target unconfirmed after two complete sends")
                     if outcome == "superseded":
@@ -422,18 +400,12 @@ class CommandExecutor:
             else float(command.transition)
         )
 
-        if kind is CommandKind.POWER_ON:
+        if kind is CommandKind.POWER_ON or kind is CommandKind.POWER_OFF:
+            on = kind is CommandKind.POWER_ON
             return PreparedCommand(
                 command,
-                make_power(True, mesh_id=self._mesh_id),
-                "power:on",
-            )
-
-        if kind is CommandKind.POWER_OFF:
-            return PreparedCommand(
-                command,
-                make_power(False, mesh_id=self._mesh_id),
-                "power:off",
+                make_power(on, mesh_id=self._mesh_id),
+                "power:on" if on else "power:off",
             )
 
         if kind is CommandKind.BRIGHTNESS_ON:
@@ -443,7 +415,7 @@ class CommandExecutor:
             return PreparedCommand(
                 command,
                 make_brightness(
-                    ha_brightness_to_device(brightness),
+                    brightness,
                     transition,
                     mesh_id=self._mesh_id,
                 ),
@@ -486,25 +458,18 @@ class CommandExecutor:
                 f"color_temp:{kelvin}K",
             )
 
-        if kind is CommandKind.EFFECT_START:
-            effect = self._require_effect(command.value, for_stop=False)
+        if kind is CommandKind.EFFECT_START or kind is CommandKind.EFFECT_STOP:
+            start = kind is CommandKind.EFFECT_START
+            effect = self._require_effect(command.value, for_stop=not start)
             if effect == EFFECT_COLOR_CYCLE:
-                frame = make_color_cycle_start(mesh_id=self._mesh_id)
-                label = "effect:color_cycle:start"
+                builder = make_color_cycle_start if start else make_color_cycle_stop
+                frame = builder(mesh_id=self._mesh_id)
+                label = "color_cycle"
             else:
-                frame = make_candle_effect(True, mesh_id=self._mesh_id)
-                label = "effect:candle:start"
-            return PreparedCommand(command, frame, label)
-
-        if kind is CommandKind.EFFECT_STOP:
-            effect = self._require_effect(command.value, for_stop=True)
-            if effect == EFFECT_COLOR_CYCLE:
-                frame = make_color_cycle_stop(mesh_id=self._mesh_id)
-                label = "effect:color_cycle:stop"
-            else:
-                frame = make_candle_effect(False, mesh_id=self._mesh_id)
-                label = "effect:candle:stop"
-            return PreparedCommand(command, frame, label)
+                frame = make_candle_effect(start, mesh_id=self._mesh_id)
+                label = "candle"
+            action = "start" if start else "stop"
+            return PreparedCommand(command, frame, f"effect:{label}:{action}")
 
         raise CommandExecutorError(f"Unsupported command kind: {kind!r}")
 
@@ -519,9 +484,9 @@ class CommandExecutor:
 
         effect = str(value)
         normalized = effect.strip().casefold().replace("-", "_").replace(" ", "_")
-        if effect == EFFECT_COLOR_CYCLE or normalized == "color_cycle":
+        if normalized == "color_cycle":
             return EFFECT_COLOR_CYCLE
-        if effect == EFFECT_CANDLE or normalized == "candle":
+        if normalized == "candle":
             return EFFECT_CANDLE
         raise UnsupportedEffectError(f"Unsupported AwoX native effect: {effect!r}")
 

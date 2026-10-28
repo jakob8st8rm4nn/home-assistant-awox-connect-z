@@ -2,6 +2,21 @@
 
 This specification describes the implemented behavior of the AwoX/EGLO Connect.Z command pipeline. Commands are symbolic; protocol frames are documented in the [protocol reference](protocol.md).
 
+## Implementation structure
+
+The command pipeline lives in the `command/` package:
+
+| Module | Responsibility |
+|---|---|
+| [sequences.py](../custom_components/awox_connect_z/command/sequences.py) | Request normalization and symbolic command order |
+| [manager.py](../custom_components/awox_connect_z/command/manager.py) | Planner state, pending targets, finalizers and command spacing |
+| [executor.py](../custom_components/awox_connect_z/command/executor.py) | Command selection, encoded writes and group execution |
+| [confirmation.py](../custom_components/awox_connect_z/command/confirmation.py) | Immutable executed groups, status goals and confirmation/repeat policy |
+| [timing.py](../custom_components/awox_connect_z/command/timing.py) | Shared fade-allowance calculation |
+
+Connection and authentication remain in `client.py`; 1911 decoding and reply
+storage remain in `status_1911.py`. The package initializer is empty.
+
 ## Terms
 
 - **UNKNOWN:** The lamp state needed to select a command sequence is not yet known.
@@ -137,7 +152,7 @@ Confirmation requires direct type `0x80`, matching mesh ID/MAC suffix and the cu
 - **Polls:** If not matched, send up to seven directed status queries, with 250 ms response windows. Mismatch and incomplete data do not trigger early resends. Poll writes are not lamp controls and do not inherit the configurable lamp-command gap.
 - **Repeat:** If still unmatched, repeat the entire immutable plaintext group once with the same session key. A newer waiting request does not invalidate or change this replay. Retain fade-aware control spacing, mandatory power steps and the same response/poll policy, recalculated from the new write times. The budget is separate from confirmed-non-delivery transport retries. Replay never calls semantic write completion again.
 - **New requests:** While a group runs or waits for confirmation, merge newer targets into separate latest-wins waiting slots. Preserve independent surviving slots and effect/power conflict rules. Promote waiting work only after the group finishes. Replaced waiting targets complete without a superseded error; this does not assert that they were executed. Explicit cancellation, session loss and terminal failures still abort as specified below.
-- **State sources:** Receive valid 1911 replies into the session store for group confirmation and UNKNOWN bootstrap only. Individual notifications never synchronize the HA display or planner, including after a completed group. Apply the selected successful group-confirmation result after the barrier, or explicitly apply the UNKNOWN-bootstrap result. Advertisements retain their normal state-update behavior outside active groups. No extra polling is introduced.
+- **State sources:** Receive valid 1911 replies into the session store for group confirmation and UNKNOWN bootstrap only. Individual notifications never synchronize the HA display or planner, including after a completed group. Apply the selected successful group-confirmation result to the planner after the barrier. Publish its light state only when no accepted follow-up requests remain open; otherwise keep processing those requests without displaying the older result. Explicitly apply the UNKNOWN-bootstrap result. Advertisements retain their normal state-update behavior outside active groups. No extra polling is introduced.
 - **Final failure:** After both sends remain unconfirmed, mark planner state UNKNOWN and fail pending requests, including newer requests if still pending. Never retain work for automatic later replay. A valid state advertisement or the result of a bounded initial-status query permits a new request.
 - **Session loss:** Invalidate old status waiters and stop the batch. Do not reconnect to replay an old group. Notification callbacks carry the authentication generation; old callbacks cannot populate a new session. Idle disconnect is held off during group execution/confirmation and restored afterward.
 - **Protocol limit:** Replies have no unique query identifier or trustworthy device measurement timestamp. Session and reception-time filtering reject old sessions/pre-write receptions but cannot prove which same-session query produced a delayed reply. A matching state is not proof of physical light output.
@@ -146,7 +161,7 @@ Confirmation requires direct type `0x80`, matching mesh ID/MAC suffix and the cu
 
 - **Intermediate cycle modes:** `0x04`/`0x05` retain Color Cycle identity with a CCT base; they cannot satisfy `effect=None` or Candle goals. Keep waiting inside the normal response window. Poll only when that window expires without a complete match.
 - **Dynamic hue:** Native-effect hue `0xFF` has no fixed angle and cannot satisfy a fixed hue goal. A Color-Cycle goal does not require a static appearance match; accepted field ranges are defined in the [protocol reference](protocol.md#brightness-hue-and-saturation-ranges).
-- **HA display:** The final successful 1911 group-confirmation reply updates power, brightness, effect and convertible color/CCT values, including native effects. Display values come from the reply, not the requested command values. Color Cycle appearance is a momentary sample, not a permanent color target. Hue `0xFF` does not overwrite the previous HS value. Other 1911 replies update neither display nor planner. Effect advertisements preserve HA color/CCT and color mode while still updating power, brightness and effect. The explicit UNKNOWN-bootstrap result uses that same appearance-preserving effect path.
+- **HA display:** When no accepted follow-up requests remain open, the final successful 1911 group-confirmation reply updates power, brightness, effect and convertible color/CCT values, including native effects. Earlier completed groups still update the planner internally; their display publication is suppressed while follow-up work remains. Display values come from the reply, not the requested command values. Color Cycle appearance is a momentary sample, not a permanent color target. Hue `0xFF` does not overwrite the previous HS value. Other 1911 replies update neither display nor planner. Effect advertisements preserve HA color/CCT and color mode while still updating power, brightness and effect. The explicit UNKNOWN-bootstrap result uses that same appearance-preserving effect path.
 - **Confirmation is separate:** Retain appearance raw fields for diagnostics and any goals required by the encoded group, such as Color/CCT + Candle. The display policy does not remove or relax those goals.
 
 ## Failure handling and cancellation

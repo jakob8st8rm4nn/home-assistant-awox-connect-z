@@ -42,6 +42,7 @@ from .client import (
     AwoxConnectZClient,
 )
 from .cloud import (
+    AwoxAccountImport,
     AwoxCloudError,
     AwoxInvalidAuth,
     AwoxNoDevices,
@@ -106,13 +107,9 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         self._local_verified_addresses: set[str] = set()
         self._local_scan_done = False
         self._local_reconfigure_mode = False
-        self._local_failed_device = ""
         self._local_mesh_id_conflicts: dict[str, tuple[int, int]] = {}
         self._local_observed_mesh_ids: dict[str, int] = {}
-        self._local_conflict_entered_id = ""
-        self._local_conflict_advertised_id = ""
-        self._local_unavailable_devices = ""
-        self._local_rejected_devices = ""
+        self._reset_local_errors()
         self._local_scan_error = False
         self._pending_cloud_data: dict[str, Any] | None = None
         self._pending_cloud_review_counts: tuple[int, int] | None = None
@@ -149,6 +146,19 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             return "mesh_credential_too_long"
         return None
 
+    @classmethod
+    def _local_credentials_from_input(
+        cls, user_input: dict[str, Any]
+    ) -> tuple[str, str, dict[str, str]]:
+        """Normalize local form credentials and retain field-specific errors."""
+        mesh_name = str(user_input[CONF_MESH_NAME]).strip()
+        mesh_password = str(user_input[CONF_MESH_PASSWORD])
+        errors = {}
+        for field, value in ((CONF_MESH_NAME, mesh_name), (CONF_MESH_PASSWORD, mesh_password)):
+            if error := cls._mesh_credential_error(value):
+                errors[field] = error
+        return mesh_name, mesh_password, errors
+
     @staticmethod
     def _parse_mesh_id(value: Any) -> int | None:
         """Parse decimal or 0x-prefixed per-lamp mesh destination."""
@@ -163,7 +173,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
     def _local_device_record(
         *, name: str, address: str, mesh_id: int, device_type: str
     ) -> dict[str, Any]:
-        """Build a local-only device record compatible with normal setup."""
+        """Build a device record for local or Bluetooth-discovered setup."""
         return {
             "name": name,
             "mac": address,
@@ -181,10 +191,10 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> set[str]:
         """Return Bluetooth addresses already present in config entries."""
         return {
-            str(device.get("mac") or "").upper()
+            self._device_address(device)
             for entry in self._configured_entries()
             if exclude_entry is None or entry.entry_id != exclude_entry.entry_id
-            for device in list(entry.data.get(CONF_DEVICES) or [])
+            for device in (entry.data.get(CONF_DEVICES) or [])
             if device.get("mac")
         }
 
@@ -237,7 +247,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         if not self._local_reconfigure_mode:
             return None
         entry = self._get_reconfigure_entry()
-        for device in list(entry.data.get(CONF_DEVICES) or []):
+        for device in (entry.data.get(CONF_DEVICES) or []):
             if self._device_address(device) == address:
                 return dict(device)
         return None
@@ -283,7 +293,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             # Surface an already-configured lamp only when the live advertisement
             # contradicts its stored target address. Keep its stored name/ID so the
             # user sees what must be corrected.
-            candidate = dict(stored)
+            candidate = stored
             candidate["device_type"] = "local_existing_mesh_id_conflict"
             self._local_candidates[address] = candidate
             self._local_mesh_id_conflicts[address] = (
@@ -475,19 +485,20 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 return entry
         return None
 
-    @staticmethod
+    @classmethod
     def _merge_devices(
+        cls,
         existing: list[dict[str, Any]],
         additional: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Merge device records by Bluetooth address."""
         merged = {
-            str(device.get("mac") or "").upper(): dict(device)
+            cls._device_address(device): dict(device)
             for device in existing
             if device.get("mac")
         }
         for device in additional:
-            address = str(device.get("mac") or "").upper()
+            address = cls._device_address(device)
             if address:
                 merged[address] = dict(device)
         return list(merged.values())
@@ -499,10 +510,73 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             label = f"{device['name']} — 0x{int(device['mesh_id']):04X}"
             conflict = self._local_mesh_id_conflicts.get(address)
             if conflict is not None:
-                entered_id, advertised_id = conflict
+                _, advertised_id = conflict
                 label += f" ⚠ Advertisement 0x{advertised_id:04X}"
             options.append(SelectOptionDict(value=address, label=label))
         return options
+
+    def _set_local_selection(self, selected: Any) -> None:
+        """Keep only selected addresses present in the current candidate set."""
+        selected = selected or []
+        if isinstance(selected, str):
+            selected = [selected]
+        self._local_selected_addresses = {
+            address for value in selected
+            if (address := str(value).upper()) in self._local_candidates
+        }
+
+    def _reset_local_selection(self, *, reconfigure: bool) -> None:
+        """Start a new selection without changing credential-cache ownership."""
+        self._local_candidates = {}
+        self._local_selected_addresses = set()
+        self._local_mesh_id_conflicts = {}
+        self._local_observed_mesh_ids = {}
+        self._local_scan_error = False
+        self._local_scan_done = False
+        self._local_reconfigure_mode = reconfigure
+        self._local_failed_device = ""
+
+    def _local_selection_placeholders(
+        self, *, existing_count: int | None = None
+    ) -> dict[str, str]:
+        """Build the shared selection counts and verification error details."""
+        placeholders = {
+            "count": str(len(self._local_candidates)),
+            "seconds": str(LOCAL_DISCOVERY_SCAN_SECONDS),
+        }
+        if existing_count is not None:
+            placeholders["existing_count"] = str(existing_count)
+        placeholders.update({
+            "failed_device": self._local_failed_device,
+            "entered_mesh_id": self._local_conflict_entered_id,
+            "advertised_mesh_id": self._local_conflict_advertised_id,
+            "unavailable_devices": self._local_unavailable_devices,
+            "rejected_devices": self._local_rejected_devices,
+        })
+        return placeholders
+
+    def _local_device_selection_schema(self) -> tuple[vol.Schema, bool]:
+        """Build the shared device selection fields and report available options."""
+        options = self._local_device_options()
+        default_selected = [
+            address
+            for address in sorted(self._local_selected_addresses)
+            if address in self._local_candidates
+        ]
+
+        schema_fields: dict[Any, Any] = {}
+        if options:
+            schema_fields[
+                vol.Optional(CONF_DEVICES, default=default_selected)
+            ] = SelectSelector(
+                SelectSelectorConfig(options=options, multiple=True)
+            )
+        schema_fields[vol.Optional("rescan", default=False)] = BooleanSelector()
+        schema_fields[
+            vol.Optional("manual_add", default=False)
+        ] = BooleanSelector()
+
+        return vol.Schema(schema_fields), bool(options)
 
     async def _async_verify_local_selection(
         self,
@@ -600,6 +674,30 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 return address
         return None
 
+    @staticmethod
+    def _cloud_import_error(error: Exception) -> str:
+        """Map cloud import failures consistently in setup and reconfiguration."""
+        for error_type, message in (
+            (AwoxInvalidAuth, "invalid_auth"),
+            (AwoxNoDevices, "no_devices"),
+            (AwoxCloudError, "cannot_connect"),
+        ):
+            if isinstance(error, error_type):
+                return message
+        return "unknown"
+
+    @staticmethod
+    def _cloud_entry_data(email: str, imported: AwoxAccountImport) -> dict[str, Any]:
+        """Build shared stored import data without account login credentials."""
+        return {
+            CONF_SETUP_METHOD: SETUP_METHOD_CLOUD,
+            CONF_EMAIL: email,
+            CONF_OWNER_ID: imported.owner_id,
+            CONF_MESH_NAME: imported.mesh_name,
+            CONF_MESH_PASSWORD: imported.mesh_password,
+            CONF_DEVICES: list(imported.devices),
+        }
+
     def _cloud_review_devices(
         self, *, exclude_entry: ConfigEntry | None = None
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -607,7 +705,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._pending_cloud_data is None:
             return [], []
         return self._filter_conflicting_devices(
-            list(self._pending_cloud_data.get(CONF_DEVICES) or []),
+            self._pending_cloud_data.get(CONF_DEVICES) or [],
             self._configured_addresses(exclude_entry=exclude_entry),
         )
 
@@ -638,13 +736,18 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             await verifier.async_close()
         return None
 
+    def _abort_device_configured_during_setup(self, address: str) -> ConfigFlowResult:
+        """Report a lamp claimed by another entry during local setup."""
+        return self.async_abort(
+            reason="device_configured_during_setup",
+            description_placeholders={"device": self._device_label(address)},
+        )
+
     async def _async_create_local_entry(
         self, devices: list[dict[str, Any]]
     ) -> ConfigFlowResult:
         """Create or extend one local mesh entry with a final duplicate check."""
-        if self._local_mesh_name is None or self._local_mesh_password is None:
-            return self.async_abort(reason="local_setup_incomplete")
-        if not devices:
+        if self._local_mesh_name is None or self._local_mesh_password is None or not devices:
             return self.async_abort(reason="local_setup_incomplete")
 
         existing_entry = self._matching_local_mesh_entry()
@@ -661,18 +764,10 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             devices, exclude_entry=existing_entry
         )
         if conflict is not None:
-            return self.async_abort(
-                reason="device_configured_during_setup",
-                description_placeholders={
-                    "device": self._device_label(conflict),
-                },
-            )
+            return self._abort_device_configured_during_setup(conflict)
 
         if existing_entry is not None:
-            existing_devices = [
-                dict(device)
-                for device in list(existing_entry.data.get(CONF_DEVICES) or [])
-            ]
+            existing_devices = existing_entry.data.get(CONF_DEVICES) or []
             old_addresses = {
                 self._device_address(device) for device in existing_devices
             }
@@ -691,9 +786,9 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             self._async_abort_bluetooth_discovery_flows(
                 {
-                    self._device_address(device)
+                    address
                     for device in actually_new
-                    if self._device_address(device)
+                    if (address := self._device_address(device))
                 }
             )
             await self.hass.config_entries.async_reload(existing_entry.entry_id)
@@ -705,18 +800,13 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         # No await between this final duplicate check and async_create_entry().
         conflict = self._first_device_conflict(devices)
         if conflict is not None:
-            return self.async_abort(
-                reason="device_configured_during_setup",
-                description_placeholders={
-                    "device": self._device_label(conflict),
-                },
-            )
+            return self._abort_device_configured_during_setup(conflict)
 
         self._async_abort_bluetooth_discovery_flows(
             {
-                self._device_address(device)
+                address
                 for device in devices
-                if self._device_address(device)
+                if (address := self._device_address(device))
             }
         )
         return self.async_create_entry(
@@ -734,6 +824,8 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         self, addresses: set[str]
     ) -> None:
         """Close stale Bluetooth discovery cards for newly configured lamps."""
+        if not addresses:
+            return
         normalized = {address.upper() for address in addresses}
         for flow in self._async_in_progress(include_uninitialized=True):
             if flow["flow_id"] == self.flow_id:
@@ -746,13 +838,13 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             self.hass.config_entries.flow.async_abort(flow["flow_id"])
 
-    @staticmethod
-    def _entry_contains_address(entry: ConfigEntry, address: str) -> bool:
+    @classmethod
+    def _entry_contains_address(cls, entry: ConfigEntry, address: str) -> bool:
         """Return whether an account entry already contains this BLE address."""
         normalized = address.upper()
         return any(
-            str(device.get("mac") or "").upper() == normalized
-            for device in list(entry.data.get(CONF_DEVICES) or [])
+            cls._device_address(device) == normalized
+            for device in (entry.data.get(CONF_DEVICES) or [])
         )
 
     @staticmethod
@@ -772,15 +864,6 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         address: str,
     ) -> bluetooth.BluetoothServiceInfoBleak:
         """Wait for the long Connect.Z advertisement that contains the mesh ID."""
-        raw = discovery_info.manufacturer_data.get(AWOX_COMPANY_ID)
-        if raw is not None:
-            data = bytes(raw)
-            if (
-                advertisement_matches_address(data, address)
-                and parse_awox_advertisement(data) is not None
-            ):
-                return discovery_info
-
         def _complete(
             service_info: bluetooth.BluetoothServiceInfoBleak,
         ) -> bool:
@@ -792,6 +875,9 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 advertisement_matches_address(data, address)
                 and parse_awox_advertisement(data) is not None
             )
+
+        if _complete(discovery_info):
+            return discovery_info
 
         return await bluetooth.async_process_advertisements(
             self.hass,
@@ -876,28 +962,15 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 imported = await async_import_account(
                     self.hass, email, password
                 )
-            except AwoxInvalidAuth:
-                errors["base"] = "invalid_auth"
-            except AwoxNoDevices:
-                errors["base"] = "no_devices"
-            except AwoxCloudError:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                errors["base"] = "unknown"
+            except Exception as error:
+                errors["base"] = self._cloud_import_error(error)
             else:
                 await self.async_set_unique_id(
                     f"awox-cloud-{imported.owner_id}"
                 )
                 self._abort_if_unique_id_configured()
 
-                self._pending_cloud_data = {
-                    CONF_SETUP_METHOD: SETUP_METHOD_CLOUD,
-                    CONF_EMAIL: email,
-                    CONF_OWNER_ID: imported.owner_id,
-                    CONF_MESH_NAME: imported.mesh_name,
-                    CONF_MESH_PASSWORD: imported.mesh_password,
-                    CONF_DEVICES: list(imported.devices),
-                }
+                self._pending_cloud_data = self._cloud_entry_data(email, imported)
                 imported_devices, conflicts = self._cloud_review_devices()
 
                 if not imported_devices:
@@ -950,13 +1023,9 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             if not imported_devices:
                 errors["base"] = "cloud_devices_already_configured"
             elif (
-                self._pending_cloud_review_counts is not None
-                and current_counts != self._pending_cloud_review_counts
+                self._pending_cloud_review_counts is None
+                or current_counts == self._pending_cloud_review_counts
             ):
-                # Another config flow changed ownership while the review page
-                # was open. Show the updated counts once more before saving.
-                self._pending_cloud_review_counts = current_counts
-            else:
                 self._abort_if_unique_id_configured()
                 data = dict(self._pending_cloud_data)
                 data[CONF_DEVICES] = imported_devices
@@ -969,6 +1038,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                     data=data,
                 )
 
+        # Changed ownership counts must be shown again before saving.
         self._pending_cloud_review_counts = current_counts
         self._set_confirm_only()
         return self.async_show_form(
@@ -986,24 +1056,11 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         """Collect the local Connect.Z mesh credential."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            mesh_name = str(user_input[CONF_MESH_NAME]).strip()
-            mesh_password = str(user_input[CONF_MESH_PASSWORD])
-
-            if error := self._mesh_credential_error(mesh_name):
-                errors[CONF_MESH_NAME] = error
-            if error := self._mesh_credential_error(mesh_password):
-                errors[CONF_MESH_PASSWORD] = error
+            mesh_name, mesh_password, errors = self._local_credentials_from_input(user_input)
 
             if not errors:
                 self._set_local_credentials(mesh_name, mesh_password)
-                self._local_candidates = {}
-                self._local_selected_addresses = set()
-                self._local_mesh_id_conflicts = {}
-                self._local_observed_mesh_ids = {}
-                self._local_scan_error = False
-                self._local_scan_done = False
-                self._local_reconfigure_mode = False
-                self._local_failed_device = ""
+                self._reset_local_selection(reconfigure=False)
                 return await self.async_step_local_devices()
 
         schema = vol.Schema(
@@ -1039,14 +1096,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         self._reset_local_errors()
 
         if user_input is not None:
-            selected = user_input.get(CONF_DEVICES) or []
-            if isinstance(selected, str):
-                selected = [selected]
-            self._local_selected_addresses = {
-                str(address).upper()
-                for address in selected
-                if str(address).upper() in self._local_candidates
-            }
+            self._set_local_selection(user_input.get(CONF_DEVICES))
 
             if bool(user_input.get("rescan")):
                 await self._async_refresh_local_selection()
@@ -1068,38 +1118,13 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 else:
                     return await self._async_create_local_entry(devices)
 
-        options = self._local_device_options()
-        default_selected = [
-            address
-            for address in sorted(self._local_selected_addresses)
-            if address in self._local_candidates
-        ]
-
-        schema_fields: dict[Any, Any] = {}
-        if options:
-            schema_fields[
-                vol.Optional(CONF_DEVICES, default=default_selected)
-            ] = SelectSelector(
-                SelectSelectorConfig(options=options, multiple=True)
-            )
-        schema_fields[vol.Optional("rescan", default=False)] = BooleanSelector()
-        schema_fields[
-            vol.Optional("manual_add", default=False)
-        ] = BooleanSelector()
+        schema, has_options = self._local_device_selection_schema()
 
         return self.async_show_form(
-            step_id="local_devices" if options else "local_devices_empty",
-            data_schema=vol.Schema(schema_fields),
+            step_id="local_devices" if has_options else "local_devices_empty",
+            data_schema=schema,
             errors=errors,
-            description_placeholders={
-                "count": str(len(self._local_candidates)),
-                "seconds": str(LOCAL_DISCOVERY_SCAN_SECONDS),
-                "failed_device": self._local_failed_device,
-                "entered_mesh_id": self._local_conflict_entered_id,
-                "advertised_mesh_id": self._local_conflict_advertised_id,
-                "unavailable_devices": self._local_unavailable_devices,
-                "rejected_devices": self._local_rejected_devices,
-            },
+            description_placeholders=self._local_selection_placeholders(),
         )
 
     async def async_step_local_devices_empty(
@@ -1233,6 +1258,14 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
+    def _clear_bluetooth_match_history(self, address: str) -> None:
+        """Allow a later advertisement to start Bluetooth discovery again."""
+        clear_match_history = getattr(
+            bluetooth, "async_clear_address_from_match_history", None
+        )
+        if clear_match_history is not None:
+            clear_match_history(self.hass, address)
+
     async def async_step_bluetooth(
         self,
         discovery_info: bluetooth.BluetoothServiceInfoBleak,
@@ -1248,11 +1281,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
 
         entries = self._configured_entries()
         if not entries:
-            clear_match_history = getattr(
-                bluetooth, "async_clear_address_from_match_history", None
-            )
-            if clear_match_history is not None:
-                clear_match_history(self.hass, address)
+            self._clear_bluetooth_match_history(address)
             return self.async_abort(reason="account_required")
 
         if any(
@@ -1267,11 +1296,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         except TimeoutError:
             # Allow a later complete advertisement to trigger discovery again.
-            clear_match_history = getattr(
-                bluetooth, "async_clear_address_from_match_history", None
-            )
-            if clear_match_history is not None:
-                clear_match_history(self.hass, address)
+            self._clear_bluetooth_match_history(address)
             return self.async_abort(reason="incomplete_advertisement")
 
         raw = complete_info.manufacturer_data.get(AWOX_COMPANY_ID)
@@ -1341,17 +1366,12 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 devices = [dict(device) for device in
                            matching_entry.data.get(CONF_DEVICES, [])]
                 devices.append(
-                    {
-                        "name": self._discovered_name,
-                        "mac": address,
-                        "mesh_id": mesh_id,
-                        "model": "Connect.Z",
-                        "manufacturer": "EGLO / AwoX",
-                        "firmware": None,
-                        "hardware": None,
-                        "device_type": "bluetooth_discovered",
-                        "cloud_object_id": "",
-                    }
+                    self._local_device_record(
+                        name=self._discovered_name,
+                        address=address,
+                        mesh_id=mesh_id,
+                        device_type="bluetooth_discovered",
+                    )
                 )
                 new_data = dict(matching_entry.data)
                 new_data[CONF_DEVICES] = devices
@@ -1396,14 +1416,8 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                 imported = await async_import_account(
                     self.hass, email, password
                 )
-            except AwoxInvalidAuth:
-                errors["base"] = "invalid_auth"
-            except AwoxNoDevices:
-                errors["base"] = "no_devices"
-            except AwoxCloudError:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                errors["base"] = "unknown"
+            except Exception as error:
+                errors["base"] = self._cloud_import_error(error)
             else:
                 await self.async_set_unique_id(
                     f"awox-cloud-{imported.owner_id}"
@@ -1412,14 +1426,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                     reason="wrong_account"
                 )
 
-                self._pending_cloud_data = {
-                    CONF_SETUP_METHOD: SETUP_METHOD_CLOUD,
-                    CONF_EMAIL: email,
-                    CONF_OWNER_ID: imported.owner_id,
-                    CONF_MESH_NAME: imported.mesh_name,
-                    CONF_MESH_PASSWORD: imported.mesh_password,
-                    CONF_DEVICES: list(imported.devices),
-                }
+                self._pending_cloud_data = self._cloud_entry_data(email, imported)
                 imported_devices, conflicts = self._cloud_review_devices(
                     exclude_entry=reconfigure_entry
                 )
@@ -1433,18 +1440,13 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                     return await self.async_step_reconfigure_cloud_review()
                 else:
+                    data_updates = self._pending_cloud_data
+                    data_updates[CONF_DEVICES] = imported_devices
                     self._pending_cloud_data = None
                     self._pending_cloud_review_counts = None
                     return self.async_update_reload_and_abort(
                         reconfigure_entry,
-                        data_updates={
-                            CONF_SETUP_METHOD: SETUP_METHOD_CLOUD,
-                            CONF_EMAIL: email,
-                            CONF_OWNER_ID: imported.owner_id,
-                            CONF_MESH_NAME: imported.mesh_name,
-                            CONF_MESH_PASSWORD: imported.mesh_password,
-                            CONF_DEVICES: imported_devices,
-                        },
+                        data_updates=data_updates,
                     )
 
         email_default = (
@@ -1486,11 +1488,9 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             if not imported_devices:
                 errors["base"] = "cloud_devices_already_configured"
             elif (
-                self._pending_cloud_review_counts is not None
-                and current_counts != self._pending_cloud_review_counts
+                self._pending_cloud_review_counts is None
+                or current_counts == self._pending_cloud_review_counts
             ):
-                self._pending_cloud_review_counts = current_counts
-            else:
                 data_updates = dict(self._pending_cloud_data)
                 data_updates[CONF_DEVICES] = imported_devices
                 self._pending_cloud_data = None
@@ -1502,6 +1502,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                     data_updates=data_updates,
                 )
 
+        # Changed ownership counts must be shown again before saving.
         self._pending_cloud_review_counts = current_counts
         self._set_confirm_only()
         return self.async_show_form(
@@ -1521,13 +1522,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         reconfigure_entry = self._get_reconfigure_entry()
 
         if user_input is not None:
-            mesh_name = str(user_input[CONF_MESH_NAME]).strip()
-            mesh_password = str(user_input[CONF_MESH_PASSWORD])
-
-            if error := self._mesh_credential_error(mesh_name):
-                errors[CONF_MESH_NAME] = error
-            if error := self._mesh_credential_error(mesh_password):
-                errors[CONF_MESH_PASSWORD] = error
+            mesh_name, mesh_password, errors = self._local_credentials_from_input(user_input)
 
             if errors:
                 devices = []
@@ -1538,7 +1533,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
             had_auth_error = False
             verified = False
             for device in devices:
-                address = str(device.get("mac") or "").upper()
+                address = self._device_address(device)
                 if not address:
                     continue
                 verify_error = await self._async_verify_credentials(
@@ -1554,14 +1549,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
 
             if verified:
                 self._set_local_credentials(mesh_name, mesh_password)
-                self._local_candidates = {}
-                self._local_selected_addresses = set()
-                self._local_mesh_id_conflicts = {}
-                self._local_observed_mesh_ids = {}
-                self._local_scan_error = False
-                self._local_scan_done = False
-                self._local_reconfigure_mode = True
-                self._local_failed_device = ""
+                self._reset_local_selection(reconfigure=True)
                 return await self.async_step_reconfigure_local_devices()
 
             if not errors:
@@ -1615,14 +1603,7 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
         self._reset_local_errors()
 
         if user_input is not None:
-            selected = user_input.get(CONF_DEVICES) or []
-            if isinstance(selected, str):
-                selected = [selected]
-            self._local_selected_addresses = {
-                str(address).upper()
-                for address in selected
-                if str(address).upper() in self._local_candidates
-            }
+            self._set_local_selection(user_input.get(CONF_DEVICES))
 
             if bool(user_input.get("rescan")):
                 await self._async_refresh_local_selection(exclude_entry=reconfigure_entry)
@@ -1651,19 +1632,14 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "device_already_configured_named"
                     self._local_failed_device = self._device_label(conflict)
                 else:
-                    existing_devices = [
-                        dict(device)
-                        for device in list(
-                            reconfigure_entry.data.get(CONF_DEVICES) or []
-                        )
-                    ]
+                    existing_devices = reconfigure_entry.data.get(CONF_DEVICES) or []
                     merged = self._merge_devices(existing_devices, new_devices)
 
                     self._async_abort_bluetooth_discovery_flows(
                         {
-                            self._device_address(device)
+                            address
                             for device in new_devices
-                            if self._device_address(device)
+                            if (address := self._device_address(device))
                         }
                     )
 
@@ -1678,45 +1654,19 @@ class AwoxConnectZConfigFlow(ConfigFlow, domain=DOMAIN):
                         },
                     )
 
-        options = self._local_device_options()
-        default_selected = [
-            address
-            for address in sorted(self._local_selected_addresses)
-            if address in self._local_candidates
-        ]
-
-        schema_fields: dict[Any, Any] = {}
-        if options:
-            schema_fields[
-                vol.Optional(CONF_DEVICES, default=default_selected)
-            ] = SelectSelector(
-                SelectSelectorConfig(options=options, multiple=True)
-            )
-        schema_fields[vol.Optional("rescan", default=False)] = BooleanSelector()
-        schema_fields[
-            vol.Optional("manual_add", default=False)
-        ] = BooleanSelector()
+        schema, has_options = self._local_device_selection_schema()
 
         return self.async_show_form(
             step_id=(
                 "reconfigure_local_devices"
-                if options
+                if has_options
                 else "reconfigure_local_devices_empty"
             ),
-            data_schema=vol.Schema(schema_fields),
+            data_schema=schema,
             errors=errors,
-            description_placeholders={
-                "count": str(len(self._local_candidates)),
-                "seconds": str(LOCAL_DISCOVERY_SCAN_SECONDS),
-                "existing_count": str(
-                    len(list(reconfigure_entry.data.get(CONF_DEVICES) or []))
-                ),
-                "failed_device": self._local_failed_device,
-                "entered_mesh_id": self._local_conflict_entered_id,
-                "advertised_mesh_id": self._local_conflict_advertised_id,
-                "unavailable_devices": self._local_unavailable_devices,
-                "rejected_devices": self._local_rejected_devices,
-            },
+            description_placeholders=self._local_selection_placeholders(
+                existing_count=len(reconfigure_entry.data.get(CONF_DEVICES) or [])
+            ),
         )
 
     async def async_step_reconfigure_local_devices_empty(

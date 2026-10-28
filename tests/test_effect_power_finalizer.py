@@ -4,8 +4,8 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 SOURCE=ROOT.parent/'custom_components/awox_connect_z'
 pkg=types.ModuleType('awox_release_review');pkg.__path__=[str(SOURCE)];sys.modules[pkg.__name__]=pkg
-from awox_release_review.command_sequences import CommandKind as K,PlannerState as S,TargetState as T,plan_commands,SequenceConflictError,UnknownPlannerStateError
-from awox_release_review.command_manager import CommandManager as M,WriteFailureAction as F,CommandNotReadyError
+from awox_release_review.command.sequences import CommandKind as K,PlannerState as S,TargetState as T,plan_commands,SequenceConflictError,UnknownPlannerStateError
+from awox_release_review.command.manager import CommandManager as M,WriteFailureAction as F,CommandNotReadyError
 
 class FinalizerTests(unittest.TestCase):
  def test_current_sequence_contract(self):

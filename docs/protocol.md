@@ -98,9 +98,11 @@ The decrypted block contains:
 Validation checks the envelope, marker, supported mode and color-field policy.
 State acceptance also requires the configured mesh ID, MAC suffix and current
 session. The MAC suffix is a consistency check, not separate authentication.
-Only direct type `0x80` may establish initial state or confirm commands in 1.12.
+Only direct type `0x80` may establish initial state or confirm commands in 1.12.1.
 All accepted replies are stored, but the entity applies only the selected successful
-group-confirmation result or explicit UNKNOWN-bootstrap result. Individual
+group-confirmation result or explicit UNKNOWN-bootstrap result. Completed groups
+update the planner internally; their display result is published only when no
+accepted follow-up requests remain open. Individual
 notifications do not synchronize the displayed state or planner. Decodable `0x82`
 replies are counted and ignored. The direct/mesh
 mapping was observed with role-swapped lamps, not established for every firmware.

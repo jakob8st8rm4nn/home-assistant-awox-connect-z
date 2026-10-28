@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from aiohttp import ClientError
 from dataclasses import dataclass
+from itertools import chain
 import re
 import uuid
 from typing import Any
@@ -110,36 +111,28 @@ def _first_nonempty(device: dict[str, Any], *keys: str) -> Any:
 
 def _parse_mesh_id(value: Any) -> int:
     """Preserve the cloud's signed 16-bit Connect.Z address for diagnostics."""
-    if value is None or str(value).strip() == "":
-        return 0
     if isinstance(value, int):
-        parsed = value
-    else:
-        text = str(value).strip()
-        parsed = (
-            int(text, 0)
-            if text.lower().startswith("0x")
-            else int(text, 10)
-        )
-    return parsed & 0xFFFF
+        return value & 0xFFFF
+    text = "" if value is None else str(value).strip()
+    if text == "":
+        return 0
+    return int(text, 0 if text.lower().startswith("0x") else 10) & 0xFFFF
 
 
 def _looks_like_light(device: dict[str, Any]) -> bool:
     """Identify BLE light records while excluding explicit Wi-Fi devices."""
     dtype = str(device.get("type") or "").lower()
-    provider = str(device.get("provider") or "").lower()
-    model = str(
-        device.get("modelName")
-        or device.get("model")
-        or ""
-    ).lower()
-
-    if dtype.startswith(".wifi.") or "wifi" in provider:
+    if dtype.startswith(".wifi.") or "wifi" in str(device.get("provider") or "").lower():
         return False
 
     if "light" in dtype:
         return True
 
+    model = str(
+        device.get("modelName")
+        or device.get("model")
+        or ""
+    ).lower()
     return any(
         token in model
         for token in (
@@ -181,6 +174,8 @@ def _convert_devices(
 
         try:
             mac = _extract_mac(device)
+            if mac in seen:
+                continue
             mesh_id = _parse_mesh_id(
                 _first_nonempty(
                     device,
@@ -194,9 +189,6 @@ def _convert_devices(
             continue
 
         if not is_valid_device_mesh_id(mesh_id):
-            continue
-
-        if mac in seen:
             continue
         seen.add(mac)
 
@@ -296,7 +288,7 @@ def _merge_rows(
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    for row in [*primary, *secondary]:
+    for row in chain(primary, secondary):
         object_id = str(row.get("objectId") or "")
         if object_id:
             key = f"id:{object_id}"
@@ -319,8 +311,8 @@ async def async_import_account(
 
     user: dict[str, Any] | None = None
     base_url: str | None = None
-    last_error = "unknown"
     invalid_auth = False
+    username = email.strip().lower()
 
     for candidate_url in PARSE_URLS:
         try:
@@ -329,13 +321,12 @@ async def async_import_account(
                 candidate_url + "login",
                 headers=_headers(installation_id),
                 payload={
-                    "username": email.strip().lower(),
+                    "username": username,
                     "password": password,
                     "_method": "GET",
                 },
             )
-        except (TimeoutError, AwoxCloudError) as err:
-            last_error = str(err)
+        except (TimeoutError, AwoxCloudError):
             continue
 
         if (
@@ -347,9 +338,9 @@ async def async_import_account(
             base_url = candidate_url
             break
 
-        last_error = str(data.get("error") or f"HTTP {status}")
+        error_text = str(data.get("error") or f"HTTP {status}").lower()
         invalid_auth |= data.get("code") == 101 or any(
-            word in last_error.lower() for word in ("invalid", "password", "credential")
+            word in error_text for word in ("invalid", "password", "credential")
         )
 
     if user is None or base_url is None:

@@ -17,11 +17,12 @@ module('homeassistant.core',HomeAssistant=object,callback=lambda f:f)
 module('homeassistant.exceptions',HomeAssistantError=type('HomeAssistantError',(Exception,),{}))
 module('homeassistant.util');module('homeassistant.util.dt',utcnow=lambda:datetime.now(timezone.utc))
 module('bleak_retry_connector',BleakClientWithServiceCache=object,device_source=lambda *a:None,establish_connection=None)
-from awox112 import protocol as p,command_confirmation as cc
+from awox112 import protocol as p
+from awox112.command import confirmation as cc
 from awox112.status_1911 import Status1911Store
-from awox112.command_sequences import CommandKind as K,PlannerState as S,TargetState as T
-from awox112.command_manager import CommandManager
-from awox112.command_executor import CommandExecutor,CommandExecutionFailed
+from awox112.command.sequences import CommandKind as K,PlannerState as S,TargetState as T
+from awox112.command.manager import CommandManager
+from awox112.command.executor import CommandExecutor,CommandExecutionFailed
 from awox112.client import RuntimeCommandResult as Result,RuntimeCommandStatus as Status,AwoxConnectZClient
 
 class ColorMode(str,Enum):HS='hs';COLOR_TEMP='color_temp'
@@ -160,7 +161,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
     c.status_1911.feed(payload(dict(c.state,color_mode=True,hue=255,saturation=255)),KEY,1)
   c.hook=response;m.submit(T(effect='Color cycle'))
   await e.async_execute_group()
-  self.assertEqual(e.last_batch_outcome,'confirmed');self.assertEqual(e.last_confirmed_state.hue,255)
+  self.assertIsNotNone(e.last_confirmed_state);self.assertEqual(e.last_confirmed_state.hue,255)
   self.assertEqual(c.polls,0);self.assertFalse(c.replays)
  async def test_intermediate_waits_for_automatic_final_cct_status(self):
   m,c,e=self.setup_group('silent');c.state.update(effect='Color cycle',color_mode=True)
@@ -174,7 +175,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
     tasks.append(asyncio.create_task(final()))
   c.hook=response;m.submit(T(cct=4000))
   await e.async_execute_group();await asyncio.gather(*tasks)
-  self.assertEqual(e.last_batch_outcome,'confirmed');self.assertEqual(e.last_confirmed_state.mode,1)
+  self.assertIsNotNone(e.last_confirmed_state);self.assertEqual(e.last_confirmed_state.mode,1)
   self.assertEqual(c.polls,0);self.assertFalse(c.replays)
  async def test_intermediate_alone_cannot_confirm_effect_stopped(self):
   m,c,e=self.setup_group('silent')
@@ -467,7 +468,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
   def hook(stage):
    if stage=='poll' and c.polls==1:m.submit(T(power=False))
   c.hook=hook;await e.async_execute_group()
-  self.assertEqual(len(c.replays),2);self.assertEqual(e.last_batch_outcome,'confirmed')
+  self.assertEqual(len(c.replays),2);self.assertIsNotNone(e.last_confirmed_state)
   self.assertNotIn(old,m.pending_generations);self.assertTrue(c.state['power'])
   self.assertEqual(m.peek_next_command().kind,K.POWER_OFF)
   c.hook=None;c.behavior='correct';await e.async_execute_group()
@@ -477,7 +478,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
   def hook(stage):
    if stage=='repeat' and not seen:seen.append(True);m.submit(T(power=False))
   c.hook=hook;await e.async_execute_group()
-  self.assertEqual(len(c.replays),2);self.assertEqual(e.last_batch_outcome,'confirmed')
+  self.assertEqual(len(c.replays),2);self.assertIsNotNone(e.last_confirmed_state)
   self.assertEqual(m.peek_next_command().kind,K.POWER_OFF)
  async def test_session_loss_never_reconnects_or_replays_old_commands(self):
   m,c,e=self.setup_group('silent');m.submit(T(effect='Candle'))
@@ -599,7 +600,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
    if stage=='write' and len(c.controls)==1:m.submit(T(power=True));new.append(m.request_generation)
    if stage=='poll':self.assertIn(new[0],m.pending_generations);c.feed()
   c.hook=hook;await e.async_execute_group()
-  self.assertEqual(e.last_batch_outcome,'confirmed');self.assertFalse(m.pending_generations)
+  self.assertIsNotNone(e.last_confirmed_state);self.assertFalse(m.pending_generations)
  async def test_disconnect_interrupts_long_transition_wait(self):
   m,c,e=self.setup_group('silent');m.submit(T(brightness=200,brightness_transition=10))
   task=asyncio.create_task(e.async_execute_group());await asyncio.sleep(.01);c.connected=False
@@ -711,7 +712,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
    if stage=='write' and not seen:
     seen.append(True);m.submit(T(color=(220,80)));m.cancel_generation(m.request_generation)
   c.hook=hook;await e.async_execute_group()
-  self.assertEqual(e.last_batch_outcome,'confirmed');self.assertFalse(m.pending_generations);self.assertEqual(c.controls,[K.BRIGHTNESS_ON,K.POWER_ON])
+  self.assertIsNotNone(e.last_confirmed_state);self.assertFalse(m.pending_generations);self.assertEqual(c.controls,[K.BRIGHTNESS_ON,K.POWER_ON])
 
  async def test_failed_active_group_aborts_queued_requests_without_auto_replay(self):
   m,c,e=self.setup_group('silent');m.submit(T(brightness=200));queued=[]
@@ -802,5 +803,133 @@ class FadeDelayTests(unittest.IsolatedAsyncioTestCase):
   m.submit(T(color=(120,80),effect='Candle',appearance_transition=.1))
   await e.async_execute_group()
   self.assertEqual(len(c.replays),3);self.assertGreaterEqual(times[1]-times[0],.14)
+
+
+class SharedFadeTimingTests(unittest.TestCase):
+ def test_manager_and_replay_keep_their_original_formulas_at_boundaries(self):
+  import math
+  from awox112.command.timing import with_fade_wait
+  from awox112.const import FADE_WAIT_FACTOR
+  for spacing_ms in (0,20,250,2000):
+   for transition in (0.,.1,.2,.3,30.,6553.5):
+    m=CommandManager(S(True,True),minimum_interval_ms=spacing_ms)
+    m.note_repeat_write(100.,transition)
+    deadline=100.+spacing_ms/1000+FADE_WAIT_FACTOR*transition
+    for now in (99.,100.,math.nextafter(deadline,-math.inf),deadline,math.nextafter(deadline,math.inf)):
+     with self.subTest(spacing=spacing_ms,transition=transition,now=now):
+      expected=max(0.,spacing_ms/1000+FADE_WAIT_FACTOR*transition-max(0.,now-100.))
+      self.assertEqual(m.delay_remaining_s(now=now),expected)
+      self.assertEqual(max(0,with_fade_wait(100.+spacing_ms/1000,transition)-now),
+                       max(0,100.+spacing_ms/1000+FADE_WAIT_FACTOR*transition-now))
+ def test_confirmation_deadline_keeps_encoded_duration_and_command_scope(self):
+  from awox112.command.confirmation import ConfirmationBatch,ExecutedCommand,CONFIRMATION_AUTO_WAIT_MS
+  from awox112.command.sequences import PlannedCommand
+  from awox112.const import FADE_WAIT_FACTOR
+  for requested in (0.,.04,.05,.14,.15,.19,.25,30.,99999.):
+   frame=p.make_hs_color(120,80,requested,mesh_id=MID)
+   encoded=int.from_bytes(frame[10:12],'little')/10
+   for kind in K:
+    item=ExecutedCommand(PlannedCommand(kind),frame,99.,100.,encoded)
+    batch=ConfirmationBatch(1,(item,))
+    expected=100.+FADE_WAIT_FACTOR*encoded+CONFIRMATION_AUTO_WAIT_MS/1000 if kind in (K.COLOR,K.CCT,K.BRIGHTNESS_ON) else 0.
+    with self.subTest(requested=requested,kind=kind):self.assertEqual(batch.transition_deadline,expected)
+
+
+class StateOwnershipTests(unittest.IsolatedAsyncioTestCase):
+ setUp=Tests.setUp
+ tearDown=Tests.tearDown
+ setup_group=Tests.setup_group
+ async def test_waiting_request_does_not_change_active_group_ownership(self):
+  m,c,e=self.setup_group();m.submit(T(brightness=200));owner=m.request_generation
+  queued=[];confirmed=[];original=c.confirmation.confirm
+  def hook(stage):
+   if stage=='write' and not queued:
+    m.submit(T(power=False));queued.append(m.request_generation)
+    self.assertEqual(m.execution_generation,owner)
+  async def confirm(batch,valid,spacing,note_repeat_write,goal_provider=None):
+   expected=owner if not confirmed else queued[0]
+   self.assertEqual(e._group_cutoff,expected)
+   self.assertEqual(e._required_session,batch.session_generation)
+   self.assertTrue(valid())
+   confirmed.append(expected)
+   return await original(batch,valid,spacing,note_repeat_write,goal_provider)
+  c.hook=hook;c.confirmation.confirm=confirm
+  await e.async_execute_group()
+  self.assertEqual(m.pending_generations,frozenset(queued))
+  self.assertIsNone(e._required_session);self.assertIsNone(e._group_cutoff)
+  await e.async_execute_group()
+  self.assertEqual(confirmed,[owner,queued[0]])
+  self.assertEqual(c.controls,[K.BRIGHTNESS_ON,K.POWER_ON,K.POWER_OFF])
+  self.assertFalse(m.pending_generations);self.assertFalse(e.busy)
+ async def test_cancelled_confirmation_releases_group_and_invalidates_work(self):
+  m,c,e=self.setup_group('silent');m.submit(T(brightness=200));owner=m.request_generation
+  waiting=asyncio.Event()
+  async def wait(*args):
+   self.assertEqual(e._group_cutoff,owner)
+   self.assertEqual(e._required_session,c.status_1911.session_generation)
+   waiting.set();await asyncio.Event().wait()
+  c.status_1911.wait=wait
+  task=asyncio.create_task(e.async_execute_group())
+  try:
+   await asyncio.wait_for(waiting.wait(),.5)
+  finally:
+   task.cancel()
+   with self.assertRaises(asyncio.CancelledError):await task
+  self.assertFalse(m.state.known);self.assertFalse(m.pending_generations)
+  self.assertFalse(e.busy);self.assertIsNone(e._required_session)
+  self.assertIsNone(e._group_cutoff);self.assertIsNone(m._frozen_cutoff)
+  self.assertEqual(c.polls,0);self.assertEqual(c.replays,[])
+
+class StatusWaitSearchTests(unittest.IsolatedAsyncioTestCase):
+ def store(self):
+  store=Status1911Store(MAC,MID);store.begin(1);return store
+ def feed_at(self,store,when,*,power=True):
+  from awox112 import status_1911 as sm
+  with patch.object(sm,'time',types.SimpleNamespace(monotonic=lambda:when)):
+   store.feed(payload(dict(power=power)),KEY,1)
+ async def test_exact_write_boundary_remains_eligible(self):
+  store=self.store();self.feed_at(store,99);self.feed_at(store,100)
+  state=await store.wait({'power':True},1,100,time.monotonic(),lambda:True)
+  self.assertIs(state,store.latest)
+ async def test_old_matching_reply_does_not_confirm_and_history_is_retained(self):
+  store=self.store();self.feed_at(store,99);before=tuple(store.frames)
+  state=await store.wait({'power':True},1,100,time.monotonic(),lambda:True)
+  self.assertIsNone(state);self.assertEqual(tuple(store.frames),before)
+ async def test_earlier_fresh_match_is_used_after_newer_mismatch(self):
+  store=self.store();self.feed_at(store,99);self.feed_at(store,100);expected=store.latest
+  self.feed_at(store,101,power=False)
+  state=await store.wait({'power':True},1,100,time.monotonic(),lambda:True)
+  self.assertIs(state,expected)
+ async def test_later_notification_wakes_wait_after_stale_history(self):
+  store=self.store();self.feed_at(store,99);started=asyncio.Event()
+  def valid():started.set();return True
+  task=asyncio.create_task(store.wait({'power':True},1,100,time.monotonic()+1,valid))
+  try:
+   await asyncio.wait_for(started.wait(),.5)
+   self.assertFalse(task.done());self.feed_at(store,100.1)
+   self.assertIs(await asyncio.wait_for(task,.5),store.latest)
+  finally:
+   if not task.done():
+    task.cancel()
+    with self.assertRaises(asyncio.CancelledError):await task
+ async def test_invalidated_or_ended_session_stops_wait(self):
+  for mode in ('invalid','end','new_session','cancel'):
+   with self.subTest(mode=mode):
+    store=self.store();self.feed_at(store,99);started=asyncio.Event();current=True
+    def valid():started.set();return current
+    task=asyncio.create_task(store.wait({'power':True},1,100,time.monotonic()+1,valid))
+    try:
+     await asyncio.wait_for(started.wait(),.5)
+     if mode=='invalid':current=False
+     elif mode=='end':store.end()
+     elif mode=='new_session':store.begin(2)
+     else:task.cancel()
+     if mode=='cancel':
+      with self.assertRaises(asyncio.CancelledError):await task
+     else:self.assertIsNone(await asyncio.wait_for(task,.5))
+    finally:
+     if not task.done():
+      task.cancel()
+      with self.assertRaises(asyncio.CancelledError):await task
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -2,7 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.12.0] - Unreleased
+## [1.12.1] - 2026-10-28
+
+### Changed
+
+- Organize the command pipeline under `command/` and centralize availability evidence and device registry metadata.
+- Simplify command completion, generation/retry bookkeeping, fade timing and asynchronous cleanup while preserving command order, confirmation rules, power finalizers and cancellation behavior.
+- Share setup, reconfiguration and cloud-import preparation; avoid redundant copies, conversions, listener bookkeeping and sensor-signature processing while retaining ownership checks and review confirmation.
+
+### Fixed
+
+- Avoid publishing an older group-confirmation result while accepted follow-up requests remain open; retain internal confirmation and planner updates.
+- Export availability and Bluetooth status from one reachability calculation so diagnostic downloads cannot contain contradictory values at the timeout boundary.
+
+### Tests
+
+- Expand offline regression coverage for command execution, cancellation, configuration flows, cloud imports, diagnostic publication and protocol boundaries.
+- Pass 339 offline regression tests. The user completed targeted Home Assistant acceptance checks, including cloud import and the follow-up display change.
+
+## [1.12.0] - 2026-10-24
 
 ### Added
 
