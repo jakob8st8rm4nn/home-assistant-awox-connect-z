@@ -16,7 +16,7 @@ Compatibility with other hardware and larger meshes still needs confirmation.
 > **Experimental / community-supported:** compatibility beyond the tested hardware
 > still needs confirmation.
 
-For standalone Python access to the underlying Bluetooth protocol, see [AwoX Modern Mesh](https://github.com/jakob8st8rm4nn/awox-modern-mesh).
+For standalone Python access to the underlying Bluetooth protocol, see [EGLO connect.z Python](https://github.com/jakob8st8rm4nn/eglo-connectz-python).
 
 ## AI-assisted development
 
